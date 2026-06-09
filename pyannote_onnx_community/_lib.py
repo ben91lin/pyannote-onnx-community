@@ -133,10 +133,15 @@ def iter_windows(
 def resolve_onnx_path(repo_or_path: str, filename: str = "onnx/model.onnx") -> str:
     """Resolve a HF repo id or absolute path to an on-disk ONNX file.
 
-    If ``repo_or_path`` is an existing file, return it as-is. Otherwise treat
-    it as a HF repo id and use ``huggingface_hub.try_to_load_from_cache`` to
-    find the cached file. Caller responsibility to ensure the bundle has been
-    extracted (offline mode).
+    Resolution order:
+
+    1. If ``repo_or_path`` is an existing file, return it as-is.
+    2. Otherwise treat it as a HF repo id and use
+       ``huggingface_hub.try_to_load_from_cache`` to find the cached file
+       (fast, offline-friendly): first ``filename``, then ``"model.onnx"``.
+    3. If not cached, download via ``huggingface_hub.hf_hub_download`` —
+       first ``filename``, then ``"model.onnx"`` — so a fresh user gets the
+       model out-of-the-box.
 
     Args:
         repo_or_path: An absolute filesystem path to an ONNX file, or a
@@ -147,22 +152,35 @@ def resolve_onnx_path(repo_or_path: str, filename: str = "onnx/model.onnx") -> s
         Absolute path to the ONNX file on disk.
 
     Raises:
-        FileNotFoundError: When the file cannot be found either as a local path
-            or in the HuggingFace cache.
+        FileNotFoundError: When the file cannot be found locally, in the
+            HuggingFace cache, or via download (e.g. offline, or the repo/file
+            does not exist).
     """
     p = Path(repo_or_path)
     if p.is_file():
         return str(p)
 
+    # 2. Cache fast path. ``try_to_load_from_cache`` may return a special
+    # non-string sentinel (_CACHED_NO_EXIST) for a recorded-missing file, so
+    # treat anything that is not a str as "not cached".
     cached = try_to_load_from_cache(repo_id=repo_or_path, filename=filename)
-    if cached is None:
+    if not isinstance(cached, str):
         # Fallback: file might be at the root, try without the onnx/ subdir.
         cached = try_to_load_from_cache(repo_id=repo_or_path, filename="model.onnx")
-    if cached is None:
-        raise FileNotFoundError(
-            f"Could not resolve {repo_or_path!r} to an ONNX file. "
-            f"Tried filenames: {filename!r}, 'model.onnx'. "
-            f"Ensure the bundle has been extracted to HF cache (offline mode requires "
-            f"snapshot_download to have run on the build machine)."
-        )
-    return str(cached)
+    if isinstance(cached, str):
+        return cached
+
+    # 3. Not cached — download. Import lazily so the cost only hits when needed.
+    import huggingface_hub
+
+    try:
+        return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename=filename)
+    except Exception as exc:
+        try:
+            return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename="model.onnx")
+        except Exception as exc2:
+            raise FileNotFoundError(
+                f"Could not resolve {repo_or_path!r} to an ONNX file. "
+                f"Tried filenames: {filename!r}, 'model.onnx' (cache + download). "
+                f"You may be offline, or the repo/file does not exist."
+            ) from exc2
