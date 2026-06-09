@@ -36,12 +36,12 @@ class ONNXSpeakerDiarization:
         providers: list[str] | None = None,
     ):
         self.config = config or SDConfig()
-        providers = providers or ["CPUExecutionProvider"]
+        self._providers = providers or ["CPUExecutionProvider"]
         self._seg = seg_session or load_segmentation_session(
-            resolve_onnx_path(segmentation_repo, "onnx/model.onnx")
+            resolve_onnx_path(segmentation_repo, "onnx/model.onnx"), providers=self._providers
         )
         self._emb = emb_session or load_embedding_session(
-            resolve_onnx_path(embedding_repo, "onnx/model.onnx")
+            resolve_onnx_path(embedding_repo, "onnx/model.onnx"), providers=self._providers
         )
         self._client = PyannoteOnnxClient(seg_session=self._seg, emb_session=self._emb, config=self.config)
 

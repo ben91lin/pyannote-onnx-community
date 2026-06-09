@@ -54,8 +54,8 @@ def hysteresis_binarize(prob: np.ndarray, onset: float, offset: float) -> np.nda
     return active
 
 
-_seg_cache: dict[str, onnxruntime.InferenceSession] = {}
-_emb_cache: dict[str, onnxruntime.InferenceSession] = {}
+_seg_cache: dict[tuple[str, tuple[str, ...]], onnxruntime.InferenceSession] = {}
+_emb_cache: dict[tuple[str, tuple[str, ...]], onnxruntime.InferenceSession] = {}
 
 
 def is_available() -> bool:
@@ -63,31 +63,37 @@ def is_available() -> bool:
     return onnxruntime is not None
 
 
-def _new_session(model_path: str) -> onnxruntime.InferenceSession:
+def _new_session(model_path: str, providers=None) -> onnxruntime.InferenceSession:
     if onnxruntime is None:
         raise ImportError(
             "onnxruntime is required for pyannote_onnx SD provider. "
             "Install via `pip install pyannote-onnx-community`."
         )
     options = onnxruntime.SessionOptions()
-    return onnxruntime.InferenceSession(model_path, sess_options=options, providers=["CPUExecutionProvider"])
+    return onnxruntime.InferenceSession(
+        model_path,
+        sess_options=options,
+        providers=list(providers) if providers else ["CPUExecutionProvider"],
+    )
 
 
-def load_segmentation_session(model_path: str) -> onnxruntime.InferenceSession:
-    """Load (or return cached) segmentation ONNX session keyed by absolute path."""
-    sess = _seg_cache.get(model_path)
+def load_segmentation_session(model_path: str, providers=None) -> onnxruntime.InferenceSession:
+    """Load (or return cached) segmentation ONNX session keyed by (path, providers)."""
+    key = (model_path, tuple(providers) if providers else ("CPUExecutionProvider",))
+    sess = _seg_cache.get(key)
     if sess is None:
-        sess = _new_session(model_path)
-        _seg_cache[model_path] = sess
+        sess = _new_session(model_path, providers=providers)
+        _seg_cache[key] = sess
     return sess
 
 
-def load_embedding_session(model_path: str) -> onnxruntime.InferenceSession:
-    """Load (or return cached) embedding ONNX session keyed by absolute path."""
-    sess = _emb_cache.get(model_path)
+def load_embedding_session(model_path: str, providers=None) -> onnxruntime.InferenceSession:
+    """Load (or return cached) embedding ONNX session keyed by (path, providers)."""
+    key = (model_path, tuple(providers) if providers else ("CPUExecutionProvider",))
+    sess = _emb_cache.get(key)
     if sess is None:
-        sess = _new_session(model_path)
-        _emb_cache[model_path] = sess
+        sess = _new_session(model_path, providers=providers)
+        _emb_cache[key] = sess
     return sess
 
 
