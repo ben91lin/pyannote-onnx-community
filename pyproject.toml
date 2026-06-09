@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyannote-onnx-community"
+version = "0.1.0"
+description = "Pure-ONNX pyannote community-1 speaker diarization (VBx + PLDA) — torch-free inference, validated array-for-array against the official PyTorch pipeline."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "onnxruntime>=1.16",
+    "scipy>=1.10",
+    "kaldi-native-fbank>=1.18",
+    "huggingface_hub>=0.20",
+    "pyannote.core>=5.0",
+    "av>=11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyannote.audio==4.0.4",
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "pyannote.metrics>=3.2",
+    "pytest>=7",
+]
+
+[tool.setuptools]
+packages = ["pyannote_onnx_community"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
