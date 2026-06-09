@@ -1,0 +1,32 @@
+import numpy as np
+from pyannote.core import Annotation
+
+
+class _FakeSeg:
+    """First 5s speech (class 1 active), rest silence (class 0)."""
+
+    def run(self, _outs, feed):
+        x = feed["input_values"]
+        b, frames = x.shape[0], 50
+        logits = np.full((b, frames, 7), -10.0, dtype=np.float32)
+        logits[:, :, 1] = 10.0  # speaker A active across the whole window
+        return [logits]
+
+
+def test_vad_returns_annotation_with_speech():
+    from pyannote_onnx_community.vad import ONNXVoiceActivityDetection
+
+    vad = ONNXVoiceActivityDetection(seg_session=_FakeSeg())
+    audio = np.ones(16000 * 8, dtype=np.float32)
+    ann = vad(audio)
+    assert isinstance(ann, Annotation)
+    total = sum(seg.duration for seg in ann.get_timeline())
+    assert total > 0
+
+
+def test_segments_from_active_mask_filters_short():
+    from pyannote_onnx_community.vad import _segments_from_active_mask
+
+    active = np.array([True, True, False, True], dtype=bool)  # 0.2s, 0.1s runs
+    out = _segments_from_active_mask(active, 0.1, min_duration_on=0.15, min_duration_off=0.0)
+    assert out == [(0.0, 0.2)]
