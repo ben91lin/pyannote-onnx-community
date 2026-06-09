@@ -1,8 +1,7 @@
-"""Tests for the per-(chunk, local-speaker) Pyannote ONNX SD pipeline.
+"""Unit tests for the ONNX community-1 SD pipeline.
 
-Phase 2.5 restructure (see docs/superpowers/specs/2026-05-05-pyannote-onnx-sd-design.md):
-no flat-timeline stitching; embedding extraction is mask-conditioned per
-(chunk, local-speaker); multi-stage refinement removed.
+Phase 2.5 restructure: no flat-timeline stitching; embedding extraction is
+mask-conditioned per (chunk, local-speaker); multi-stage refinement removed.
 """
 
 from unittest.mock import MagicMock

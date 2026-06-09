@@ -18,20 +18,16 @@ Order of operations:
      label, paint per-chunk per-global-speaker activity, concatenate and
      extract contiguous runs as final output segments.
 
-Ported from voxelate's pyannote_onnx_cache.py; community-1 / VBx+PLDA pipeline.
+Pure-ONNX community-1 / VBx+PLDA speaker-diarization pipeline.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
-
-import logging
 from scipy.cluster.hierarchy import fcluster, linkage
-
-from dataclasses import dataclass as _dataclass
-
 from pyannote.core.utils.generators import string_generator
 
 from pyannote_onnx_community._lib import (
@@ -47,7 +43,7 @@ def get_speaker_string_generator():
     return string_generator()
 
 
-@_dataclass
+@dataclass
 class DiarizationSegment:
     """One diarized span. ``speaker`` is an A/B/C label (or None)."""
 
