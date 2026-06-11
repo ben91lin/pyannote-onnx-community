@@ -45,9 +45,20 @@ Three public classes, each callable on a path or a waveform array:
 from pyannote_onnx_community import ONNXSpeakerDiarization
 
 dia = ONNXSpeakerDiarization(providers=["CPUExecutionProvider"])  # or CUDA / CoreML
-ann = dia("audio.wav")                       # -> pyannote.core.Annotation
-for turn, _, spk in ann.itertracks(yield_label=True):
-    print(f"{turn.start:.1f}-{turn.end:.1f} {spk}")
+out = dia("audio.wav")                         # -> DiarizeOutput (mirrors pyannote.audio)
+
+# Overlap-aware diarization (pyannote.core.Annotation):
+for turn, _, spk in out.speaker_diarization.itertracks(yield_label=True):
+    print(f"{turn.start:.1f}-{turn.end:.1f} {spk}")     # e.g. 0.5-3.2 SPEAKER_00
+
+out.exclusive_speaker_diarization              # Annotation, no overlap (for ASR/transcription)
+out.speaker_embeddings                         # (num_speakers, 256), in labels() order
+out.serialize()                                # JSON-friendly dict
+
+# Pin / bound the speaker count, and pass a progress hook:
+out = dia("audio.wav", num_speakers=2)                          # exact count
+out = dia("audio.wav", min_speakers=2, max_speakers=5)          # bounds
+out = dia("audio.wav", hook=lambda step, x=None: print(step))   # segmentation/embeddings/...
 
 from pyannote_onnx_community import ONNXVoiceActivityDetection
 
@@ -63,9 +74,14 @@ vec = emb("audio.wav")                         # -> (256,) L2-normalised np.floa
 - `providers` (all three classes) selects the ONNX Runtime execution provider —
   `["CPUExecutionProvider"]` (default), `["CUDAExecutionProvider"]`,
   `["CoreMLExecutionProvider"]`, etc.
-- `ONNXSpeakerDiarization.__call__` accepts a `num_speakers` argument, but it is
-  currently **advisory only**: the community-1 / VBx path auto-determines the
-  speaker count, and a warning is emitted if `num_speakers` is passed.
+- `ONNXSpeakerDiarization.__call__` returns a `DiarizeOutput` (overlap-aware
+  `speaker_diarization`, non-overlapping `exclusive_speaker_diarization`,
+  per-speaker `speaker_embeddings`, and `serialize()`) — mirroring upstream
+  pyannote.audio. Need a bare `Annotation`? Use `out.speaker_diarization`.
+- `num_speakers` / `min_speakers` / `max_speakers` constrain clustering: when the
+  VBx auto-count falls outside the bounds (or `num_speakers` is pinned), the
+  speaker count is forced via a KMeans re-cluster. `min`/`max` are ignored when
+  `num_speakers` is given.
 
 ## Validation — per-stage array parity vs official pyannote.audio PyTorch
 
@@ -88,9 +104,10 @@ pytest tests/parity                  # torch-free, uses the committed goldens
 python scripts/make_goldens.py       # regenerate goldens (in a dev venv with torch)
 ```
 
-End-to-end: on a 60s clip, DER (ours vs upstream community-1, NIST-standard
-0.25s collar) = **0.239**, with the speaker count matching (2 vs 2). On longer
-audio the collar'd DER drops to **~0.05–0.13**. See `tests/e2e/test_der_parity.py`.
+End-to-end: the output stage mirrors upstream's count-based reconstruction, so
+on a 60s clip DER (ours vs upstream community-1, NIST-standard 0.25s collar) =
+**0.149**, with the speaker count matching (2 vs 2). See
+`tests/e2e/test_der_parity.py`.
 
 ## Speed
 
@@ -133,9 +150,12 @@ deployment surface while staying fast on CPU.
   clustering-sensitivity** effect of the AHC-seed `clustering_threshold`
   (default `0.7`, tunable in `SDConfig`) — it is not a stage bug. If exact
   long-form speaker-count parity matters, this threshold needs per-corpus
-  tuning.
-- **`num_speakers` is not yet enforced.** VBx auto-determines the count; passing
-  `num_speakers` emits a warning and is otherwise ignored.
+  tuning, or pin the count explicitly with `num_speakers` / `min_speakers` /
+  `max_speakers`.
+- **`num_speakers` force-count is not array-exact vs upstream.** When the VBx
+  auto-count is out of bounds the count is forced via a KMeans re-cluster using
+  SciPy's `kmeans2` (sklearn-free), so the forced assignment can differ from
+  upstream's `sklearn.KMeans`. The auto path (no constraints) is unaffected.
 
 ## Development
 
