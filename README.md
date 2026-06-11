@@ -27,9 +27,9 @@ use:
 
 Three public classes, each callable on a path/file object (decoded, resampled
 and normalised via PyAV) or a waveform array. **A waveform array must already be
-mono float32, normalised to `[-1, 1]`, at the target sample rate (16 kHz by
-default)** — it is trusted as-is and never resampled or PCM-normalised.
-Multichannel input must be 2-D `(channels, samples)` and is downmixed to mono. Integer
+float32, normalised to `[-1, 1]`, at the target sample rate (16 kHz by
+default)** — it is trusted as-is and never resampled or PCM-normalised. Pass it
+mono 1-D, or 2-D `(channels, samples)` which is downmixed to mono. Integer
 PCM (e.g. `scipy.io.wavfile` int16) or un-normalised arrays raise `ValueError`;
 convert first (`arr.astype(np.float32) / 32768.0`) or pass a path to decode.
 
