@@ -76,6 +76,13 @@ def test_nonpositive_bounds_raise(kwargs):
         cluster_embeddings_vbx(emb, plda=_MockPLDA(), threshold=0.7, fa=0.07, fb=0.8, **kwargs)
 
 
+@pytest.mark.parametrize("kwargs", [{"num_clusters": 1.5}, {"min_clusters": 1.5}, {"max_clusters": 2.5}])
+def test_non_integer_bounds_raise(kwargs):
+    emb = _two_groups(per=4)
+    with pytest.raises(ValueError, match="integer"):
+        cluster_embeddings_vbx(emb, plda=_MockPLDA(), threshold=0.7, fa=0.07, fb=0.8, **kwargs)
+
+
 def test_min_greater_than_max_raises():
     emb = _two_groups(per=4)
     with pytest.raises(ValueError):

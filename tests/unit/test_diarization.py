@@ -51,7 +51,8 @@ def _make_dia(monkeypatch):
 
 
 def _audio():
-    return np.random.default_rng(0).standard_normal(16000 * 12).astype(np.float32)
+    # normalised to [-1, 1] to satisfy load_audio's ndarray contract.
+    return (np.random.default_rng(0).standard_normal(16000 * 12) * 0.1).astype(np.float32)
 
 
 def test_call_returns_diarize_output(monkeypatch):

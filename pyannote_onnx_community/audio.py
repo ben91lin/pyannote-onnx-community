@@ -41,12 +41,15 @@ def load_audio(audio, sample_rate: int = 16000) -> np.ndarray:
                 "`arr.astype(np.float32) / 32768.0`, or pass a file path/object to decode."
             )
         wav = _downmix(audio).astype(np.float32).reshape(-1)
-        if wav.size and np.abs(wav).max() > 10.0:
-            raise ValueError(
-                "ndarray audio is not normalised to [-1, 1] (max abs value far exceeds 1); "
-                "looks like un-normalised PCM. Divide by the PCM full-scale (e.g. 32768.0), "
-                "or pass a file path/object to decode."
-            )
+        if wav.size:
+            if not np.isfinite(wav).all():
+                raise ValueError("ndarray audio contains NaN/Inf; expected finite samples in [-1, 1].")
+            if np.abs(wav).max() > 1.0 + 1e-3:
+                raise ValueError(
+                    "ndarray audio is not normalised to [-1, 1] (max abs value exceeds 1); "
+                    "looks like un-normalised PCM. Divide by the PCM full-scale (e.g. 32768.0), "
+                    "or pass a file path/object to decode."
+                )
         return wav
 
     import av

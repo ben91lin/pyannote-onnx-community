@@ -32,4 +32,11 @@ def test_unnormalised_float_ndarray_raises():
     from pyannote_onnx_community.audio import load_audio
 
     with pytest.raises(ValueError, match="normalised"):
-        load_audio(np.full(16000, 5000.0, dtype=np.float32), sample_rate=16000)
+        load_audio(np.full(16000, 2.0, dtype=np.float32), sample_rate=16000)
+
+
+def test_nonfinite_ndarray_raises():
+    from pyannote_onnx_community.audio import load_audio
+
+    with pytest.raises(ValueError, match="NaN/Inf"):
+        load_audio(np.full(16000, np.nan, dtype=np.float32), sample_rate=16000)

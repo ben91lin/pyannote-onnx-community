@@ -446,7 +446,14 @@ def _validate_cluster_args(
         ("min_speakers", min_clusters),
         ("max_speakers", max_clusters),
     ):
-        if value is not None and value < 1:
+        if value is None:
+            continue
+        integral = not isinstance(value, bool) and (
+            isinstance(value, (int, np.integer)) or (isinstance(value, float) and value.is_integer())
+        )
+        if not integral:
+            raise ValueError(f"{name} must be an integer, got {value!r}.")
+        if value < 1:
             raise ValueError(f"{name} must be >= 1, got {value}.")
     if (
         num_clusters is None
