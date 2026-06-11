@@ -25,7 +25,12 @@ use:
 
 ## Usage
 
-Three public classes, each callable on a path or a waveform array:
+Three public classes, each callable on a path/file object (decoded, resampled
+and normalised via PyAV) or a waveform array. **A waveform array must already be
+mono float32, normalised to `[-1, 1]`, at the target sample rate (16 kHz by
+default)** — it is trusted as-is and never resampled or PCM-normalised. Integer
+PCM (e.g. `scipy.io.wavfile` int16) or un-normalised arrays raise `ValueError`;
+convert first (`arr.astype(np.float32) / 32768.0`) or pass a path to decode.
 
 ```python
 from pyannote_onnx_community import ONNXSpeakerDiarization
@@ -67,7 +72,8 @@ vec = emb("audio.wav")                         # -> (256,) L2-normalised np.floa
 - `num_speakers` / `min_speakers` / `max_speakers` constrain clustering: when the
   VBx auto-count falls outside the bounds (or `num_speakers` is pinned), the
   speaker count is forced via a KMeans re-cluster. `min`/`max` are ignored when
-  `num_speakers` is given.
+  `num_speakers` is given. Invalid values (`<= 0`, or `min_speakers >
+  max_speakers`) raise `ValueError` rather than being silently clamped.
 
 ## Validation — per-stage array parity vs official pyannote.audio PyTorch
 

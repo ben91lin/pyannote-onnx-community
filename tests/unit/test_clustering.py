@@ -1,6 +1,7 @@
 """cluster_embeddings_vbx: centroid return + num/min/max force-count."""
 
 import numpy as np
+import pytest
 
 from pyannote_onnx_community._pipeline import assign_speaker_labels, cluster_embeddings_vbx
 
@@ -61,6 +62,34 @@ def test_max_clusters_caps_count():
         emb, plda=_MockPLDA(), threshold=0.7, fa=0.07, fb=0.8, max_clusters=1
     )
     assert len(np.unique(labels)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Invalid speaker-count arguments fail loud (before fast paths)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kwargs", [{"num_clusters": 0}, {"num_clusters": -1}, {"min_clusters": 0}, {"max_clusters": -2}])
+def test_nonpositive_bounds_raise(kwargs):
+    emb = _two_groups(per=4)
+    with pytest.raises(ValueError):
+        cluster_embeddings_vbx(emb, plda=_MockPLDA(), threshold=0.7, fa=0.07, fb=0.8, **kwargs)
+
+
+def test_min_greater_than_max_raises():
+    emb = _two_groups(per=4)
+    with pytest.raises(ValueError):
+        cluster_embeddings_vbx(
+            emb, plda=_MockPLDA(), threshold=0.7, fa=0.07, fb=0.8, min_clusters=3, max_clusters=2
+        )
+
+
+def test_invalid_bounds_raise_before_single_fast_path():
+    # single embedding would hit the fast path; validation must run first.
+    with pytest.raises(ValueError):
+        cluster_embeddings_vbx(
+            np.ones((1, 256), dtype=np.float32), plda=_MockPLDA(), threshold=0.7, fa=0.07, fb=0.8, num_clusters=0
+        )
 
 
 # ---------------------------------------------------------------------------

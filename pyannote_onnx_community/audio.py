@@ -1,8 +1,14 @@
 """Audio loading: decode any container to mono float32 at a target sample rate.
 
-`load_audio` accepts a path/str, a file-like object, or an np.ndarray (already
-sampled at `sample_rate`; downmixed to mono and cast to float32). Path/file
-input is decoded + resampled via PyAV (no torch).
+`load_audio` accepts a path/str, a file-like object, or an np.ndarray. Path/file
+input is decoded + resampled via PyAV (no torch) and normalised to float32.
+
+ndarray input is trusted, not converted (matching whisper's contract): it must
+already be a floating-point waveform, normalised to [-1, 1], at the target
+`sample_rate` (mono, or multichannel which is downmixed). It is NOT resampled or
+PCM-normalised — pass a path/file object if you need decoding. Integer PCM or
+clearly un-normalised arrays raise ``ValueError`` rather than producing
+plausible-but-wrong output.
 """
 
 from __future__ import annotations
@@ -22,9 +28,26 @@ def _downmix(wav: np.ndarray) -> np.ndarray:
 
 
 def load_audio(audio, sample_rate: int = 16000) -> np.ndarray:
-    """Return mono float32 PCM at `sample_rate`."""
+    """Return mono float32 PCM at `sample_rate`.
+
+    For ndarray input ``sample_rate`` is not applied (no resampling); the array
+    is trusted to already match it. See the module docstring for the contract.
+    """
     if isinstance(audio, np.ndarray):
-        return _downmix(audio).astype(np.float32).reshape(-1)
+        if not np.issubdtype(audio.dtype, np.floating):
+            raise ValueError(
+                f"ndarray audio must be a floating-point waveform, got dtype {audio.dtype}. "
+                "Integer PCM is not auto-normalised; convert first, e.g. "
+                "`arr.astype(np.float32) / 32768.0`, or pass a file path/object to decode."
+            )
+        wav = _downmix(audio).astype(np.float32).reshape(-1)
+        if wav.size and np.abs(wav).max() > 10.0:
+            raise ValueError(
+                "ndarray audio is not normalised to [-1, 1] (max abs value far exceeds 1); "
+                "looks like un-normalised PCM. Divide by the PCM full-scale (e.g. 32768.0), "
+                "or pass a file path/object to decode."
+            )
+        return wav
 
     import av
 

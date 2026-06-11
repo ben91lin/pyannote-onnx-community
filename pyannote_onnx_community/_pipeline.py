@@ -430,6 +430,33 @@ def extract_embeddings_per_chunk_speaker(
     return np.stack(embeddings).astype(np.float32), metadata
 
 
+def _validate_cluster_args(
+    num_clusters: int | None, min_clusters: int | None, max_clusters: int | None
+) -> None:
+    """Validate raw speaker-count arguments before any clamping.
+
+    Fails loud on invalid caller input rather than silently collapsing it: any
+    given bound below 1, or ``min_clusters > max_clusters``. ``num_clusters``
+    pins the count, so ``min``/``max`` are ignored when it is set (matching
+    upstream); they are still range-checked here. Must run before the
+    empty/single-embedding fast paths so bad input never slips through.
+    """
+    for name, value in (
+        ("num_speakers", num_clusters),
+        ("min_speakers", min_clusters),
+        ("max_speakers", max_clusters),
+    ):
+        if value is not None and value < 1:
+            raise ValueError(f"{name} must be >= 1, got {value}.")
+    if (
+        num_clusters is None
+        and min_clusters is not None
+        and max_clusters is not None
+        and min_clusters > max_clusters
+    ):
+        raise ValueError(f"min_speakers ({min_clusters}) must be <= max_speakers ({max_clusters}).")
+
+
 def _resolve_cluster_bounds(
     num_clusters: int | None, min_clusters: int | None, max_clusters: int | None, n: int
 ) -> tuple[int | None, int, int]:
@@ -437,11 +464,11 @@ def _resolve_cluster_bounds(
 
     Mirrors upstream ``BaseClustering.set_num_clusters``: ``num_clusters`` pins
     both bounds; otherwise min defaults to 1 and max to ``n``. All clamped to
-    ``[1, n]``.
+    ``[1, n]``. Assumes arguments already passed :func:`_validate_cluster_args`.
     """
-    lo = num_clusters or min_clusters or 1
+    lo = num_clusters if num_clusters is not None else (min_clusters if min_clusters is not None else 1)
     lo = max(1, min(n, lo))
-    hi = num_clusters or max_clusters or n
+    hi = num_clusters if num_clusters is not None else (max_clusters if max_clusters is not None else n)
     hi = max(1, min(n, hi))
     if lo > hi:
         raise ValueError(f"min_clusters ({lo}) must be <= max_clusters ({hi}).")
@@ -525,6 +552,7 @@ def cluster_embeddings_vbx(
         indexed by label). Empty input returns empty arrays; single input
         returns ``([0], embeddings[:1])``.
     """
+    _validate_cluster_args(num_clusters, min_clusters, max_clusters)
     embedding_dim = embeddings.shape[1] if embeddings.ndim == 2 else 0
     if embeddings.shape[0] == 0:
         return np.array([], dtype=np.int64), np.zeros((0, embedding_dim), dtype=np.float32)
