@@ -72,17 +72,15 @@ def top_count_discrete(activations: np.ndarray, count: np.ndarray) -> np.ndarray
     Returns:
         ``(total_frames, num_speakers)`` 0/1 array.
     """
-    total_frames, num_speakers = activations.shape
-    discrete = np.zeros_like(activations)
+    _, num_speakers = activations.shape
     if num_speakers == 0:
-        return discrete
-    order = np.argsort(-activations, axis=1)
+        return np.zeros_like(activations)
     counts = np.minimum(count.astype(np.int64), num_speakers)
-    for t in range(total_frames):
-        c = int(counts[t])
-        if c > 0:
-            discrete[t, order[t, :c]] = 1.0
-    return discrete
+    # rank[t, s] = position of speaker s when speakers are sorted by activation
+    # descending at frame t (0 = highest). The top-``count`` speakers are exactly
+    # those whose rank is below the frame's count. Vectorised over all frames.
+    ranks = np.argsort(np.argsort(-activations, axis=1), axis=1)
+    return (ranks < counts[:, None]).astype(activations.dtype)
 
 
 def reconstruct_from_chunks(

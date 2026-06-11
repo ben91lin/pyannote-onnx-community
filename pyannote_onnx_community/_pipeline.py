@@ -82,6 +82,9 @@ _OVERLAP_MEMBERSHIP: dict[int, tuple[int, ...]] = {
 # frames — hard-code to avoid the probe and make the threshold visible.
 _WESPEAKER_MIN_FBANK_FRAMES = 25
 
+# wespeaker-voxceleb-resnet34-LM embedding dimension (single source of truth).
+EMBEDDING_DIM = 256
+
 
 @dataclass(frozen=True, slots=True)
 class ChunkSegmentation:
@@ -370,7 +373,7 @@ def extract_embeddings_per_chunk_speaker(
     Returns ``(embeddings, metadata)`` — embeddings shape ``(N, 256)`` and
     one :class:`EmbeddingMetadata` per row.
     """
-    embedding_dim = 256  # wespeaker-voxceleb-resnet34-LM
+    embedding_dim = EMBEDDING_DIM  # wespeaker-voxceleb-resnet34-LM
     if not speaker_masks:
         return np.zeros((0, embedding_dim), dtype=np.float32), []
 
@@ -823,4 +826,4 @@ class PyannoteOnnxClient:
 
 
 def _empty_result() -> SDResult:
-    return SDResult(speaker=[], exclusive=[], embeddings=np.zeros((0, 256), dtype=np.float32), speaker_names=[])
+    return SDResult(speaker=[], exclusive=[], embeddings=np.zeros((0, EMBEDDING_DIM), dtype=np.float32), speaker_names=[])
