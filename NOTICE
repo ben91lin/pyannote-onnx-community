@@ -2,8 +2,8 @@ pyannote-onnx-community
 Copyright (c) 2026 Ben Lin
 
 The bulk of this project is licensed under the MIT License (see LICENSE).
-It additionally bundles the following third-party component under a separate
-license:
+It additionally bundles the following third-party files, each retaining its
+original license and copyright:
 
 ------------------------------------------------------------------------------
 pyannote_onnx_community/_vbx.py  —  Apache License 2.0
@@ -18,3 +18,14 @@ Vendored from pyannote-audio 4.0.4, licensed under the Apache License, Version
   Changes:   file header + adapted import paths only; algorithm untouched.
 
 A full copy of the Apache License 2.0 is provided in licenses/Apache-2.0.txt.
+
+------------------------------------------------------------------------------
+pyannote_onnx_community/_plda.py  —  MIT License
+------------------------------------------------------------------------------
+
+Vendored from pyannote-audio 4.0.4, licensed under the MIT License.
+
+  Source:    https://github.com/pyannote/pyannote-audio/blob/4.0.4/src/pyannote/audio/core/plda.py
+  Copyright: 2024-2025 CNRS; 2025- pyannoteAI
+  Changes:   file header; download_from_hf_hub -> huggingface_hub.snapshot_download;
+             import vbx_setup from the sibling _vbx module.

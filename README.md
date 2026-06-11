@@ -7,20 +7,6 @@ no `torch`, no `pyannote.audio` — yet every intermediate array (segmentation
 probabilities, Kaldi fbank, PLDA projection, VBx clustering, L2 norm) matches
 the upstream pyannote.audio PyTorch pipeline to cosine ~1.0.
 
-### How this differs from `samson6460/pyannote-onnx-extended`
-
-`samson6460/pyannote-onnx-extended` is also a torch-free ONNX port, but it
-targets the **older pyannote 3.1 / AHC** pipeline and computes features with a
-**librosa float-domain fbank**. This project targets the newer **community-1
-(VBx + PLDA)** generation and computes features with a **Kaldi fbank**
-(`*32768` int16 scaling + per-time CMN) — the exact feature front-end the
-wespeaker embedding model was trained on. That difference is measurable: a
-librosa float-domain fbank drifts ~0.5 cosine away from the correct wespeaker
-embeddings and is more prone to speaker collapse, whereas this repo's
-Kaldi-fbank path matches the upstream embeddings to cosine ~1.0. In short: a
-different pyannote generation plus training-matched features, not a critique of
-the other project — both are valid torch-free ports of different pipelines.
-
 ## Install
 
 ```bash
@@ -170,6 +156,18 @@ python scripts/make_goldens.py         # regenerate per-stage goldens (dev venv)
 pytest tests/e2e                       # DER parity (dev venv, needs HF token for gated community-1)
 python scripts/benchmark.py <audio>    # speed table (dev venv)
 ```
+
+## Related projects
+
+- [pyannote/pyannote-audio](https://github.com/pyannote/pyannote-audio) — the
+  official upstream this project ports and validates against (the community-1
+  pipeline).
+- [samson6460/pyannote-onnx-extended](https://github.com/samson6460/pyannote-onnx-extended)
+  — a sibling torch-free ONNX port that targets the older pyannote 3.1 / AHC
+  pipeline with a librosa float-domain fbank. This project targets community-1
+  (VBx + PLDA) with a Kaldi fbank (the front-end wespeaker was trained on),
+  which keeps embeddings at cosine ~1.0 vs the upstream PyTorch pipeline. Both
+  are valid ports of different pipelines.
 
 ## License + attribution
 
