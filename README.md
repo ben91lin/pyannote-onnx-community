@@ -1,6 +1,164 @@
 # pyannote-onnx-community
 
 Pure-ONNX pyannote **community-1** speaker diarization (VBx + PLDA). Torch-free
-inference, validated array-for-array against the official PyTorch pipeline.
+inference, validated array-for-array against the official PyTorch pipeline. The
+runtime needs only onnxruntime + a Kaldi fbank + scipy + pyannote.core + PyAV —
+no `torch`, no `pyannote.audio` — yet every intermediate array (segmentation
+probabilities, Kaldi fbank, PLDA projection, VBx clustering, L2 norm) matches
+the upstream pyannote.audio PyTorch pipeline to cosine ~1.0.
 
-(Full docs added later.)
+### How this differs from `samson6460/pyannote-onnx-extended`
+
+`samson6460/pyannote-onnx-extended` is also a torch-free ONNX port, but it
+targets the **older pyannote 3.1 / AHC** pipeline and computes features with a
+**librosa float-domain fbank**. This project targets the newer **community-1
+(VBx + PLDA)** generation and computes features with a **Kaldi fbank**
+(`*32768` int16 scaling + per-time CMN) — the exact feature front-end the
+wespeaker embedding model was trained on. That difference is measurable: a
+librosa float-domain fbank drifts ~0.5 cosine away from the correct wespeaker
+embeddings and is more prone to speaker collapse, whereas this repo's
+Kaldi-fbank path matches the upstream embeddings to cosine ~1.0. In short: a
+different pyannote generation plus training-matched features, not a critique of
+the other project — both are valid torch-free ports of different pipelines.
+
+## Install
+
+```bash
+pip install pyannote-onnx-community
+```
+
+The runtime is **torch-free**: onnxruntime + kaldi-native-fbank + scipy +
+pyannote.core + PyAV. Models auto-download from the HuggingFace Hub on first
+use:
+
+- segmentation: `onnx-community/pyannote-segmentation-3.0`
+- embedding: `onnx-community/wespeaker-voxceleb-resnet34-LM`
+- community-1 PLDA artifacts: `pyannote/speaker-diarization-community-1` (gated —
+  accept the conditions on the Hub and authenticate if downloading for the first
+  time)
+
+## Usage
+
+Three public classes, each callable on a path or a waveform array:
+
+```python
+from pyannote_onnx_community import ONNXSpeakerDiarization
+
+dia = ONNXSpeakerDiarization(providers=["CPUExecutionProvider"])  # or CUDA / CoreML
+ann = dia("audio.wav")                       # -> pyannote.core.Annotation
+for turn, _, spk in ann.itertracks(yield_label=True):
+    print(f"{turn.start:.1f}-{turn.end:.1f} {spk}")
+
+from pyannote_onnx_community import ONNXVoiceActivityDetection
+
+vad = ONNXVoiceActivityDetection()
+speech = vad("audio.wav")                     # -> Annotation of SPEECH regions
+
+from pyannote_onnx_community import ONNXSpeakerEmbedding
+
+emb = ONNXSpeakerEmbedding()
+vec = emb("audio.wav")                         # -> (256,) L2-normalised np.float32
+```
+
+- `providers` (all three classes) selects the ONNX Runtime execution provider —
+  `["CPUExecutionProvider"]` (default), `["CUDAExecutionProvider"]`,
+  `["CoreMLExecutionProvider"]`, etc.
+- `ONNXSpeakerDiarization.__call__` accepts a `num_speakers` argument, but it is
+  currently **advisory only**: the community-1 / VBx path auto-determines the
+  speaker count, and a warning is emitted if `num_speakers` is passed.
+
+## Validation — per-stage array parity vs official pyannote.audio PyTorch
+
+The reference is the official **pyannote.audio 4.0.4** PyTorch community-1
+pipeline. Goldens are committed under `tests/goldens/`, and the parity suite runs
+**torch-free** against those committed arrays.
+
+| Stage | Metric | Result vs upstream PyTorch |
+|-------|--------|----------------------------|
+| `l2_norm` | max abs diff | 0.0 |
+| `cluster_vbx` (gamma, pi) | max abs diff | 0.0 |
+| PLDA projection | max abs diff | 0.0 |
+| Kaldi fbank | cosine | 1.0000001 (max abs diff 2.5e-4) |
+| segmentation probs | cosine | 1.0000000 (max abs diff 2.4e-7) |
+
+Reproduce:
+
+```bash
+pytest tests/parity                  # torch-free, uses the committed goldens
+python scripts/make_goldens.py       # regenerate goldens (in a dev venv with torch)
+```
+
+End-to-end: on a 60s clip, DER (ours vs upstream community-1, NIST-standard
+0.25s collar) = **0.239**, with the speaker count matching (2 vs 2). On longer
+audio the collar'd DER drops to **~0.05–0.13**. See `tests/e2e/test_der_parity.py`.
+
+## Speed
+
+**Core advantage: fast on plain CPU, with zero `torch` / GPU / accelerator
+dependency.** The benchmark below was measured on the current release benchmark
+machine, an Apple M4 Pro Mac, using one 10s warmup followed by three measured
+full-audio runs per backend; tables report the median. Full environment, raw
+runs, private-input notes, and methodology are in `docs/benchmark_results.md`.
+
+| clip | audio s | engine | device | median wall s | median RTFx | speakers |
+|------|--------:|--------|--------|--------------:|------------:|---------:|
+| clip.wav | 60.0 | ours | cpu | 4.1 | 14.73 | 2 |
+| clip.wav | 60.0 | ours | coreml | 1.6 | 38.30 | 2 |
+| clip.wav | 60.0 | pytorch | cpu | 36.8 | 1.63 | 2 |
+| clip.wav | 60.0 | pytorch | mps | 2.7 | 22.14 | 2 |
+| long-clip | 600.0 | ours | cpu | 53.4 | 11.24 | 2 |
+| long-clip | 600.0 | ours | coreml | 17.8 | 33.67 | 2 |
+| long-clip | 600.0 | pytorch | cpu | 434.0 | 1.38 | 2 |
+| long-clip | 600.0 | pytorch | mps | 28.3 | 21.21 | 2 |
+
+`long-clip` is a local/private 10-minute benchmark input. It is not committed or
+distributed with this repository.
+
+The portable headline is the ONNX CPU row: it needs no CUDA, no MPS, no CoreML,
+and no `torch`, yet it processes the 10-minute private clip in 53.4s versus
+434.0s for the official PyTorch CPU pipeline on the same Mac. Accelerator rows
+map the Apple Silicon landscape. CoreML brings the ONNX path to 17.8s on the
+10-minute clip; where the multi-GB PyTorch dependency and Apple GPU acceleration
+are both acceptable, PyTorch-MPS reaches 28.3s. This repo's main win is the
+deployment surface while staying fast on CPU.
+
+## Known limitations
+
+- **Long-form speaker under-count.** On long-form audio the pipeline can
+  under-count speakers vs the full PyTorch community-1 pipeline. In a separate
+  internal long-form evaluation input, a 10-min clip produced 5 vs 6 speakers;
+  longer probes showed larger gaps. This is not the `long-clip` benchmark input
+  above, where both pipelines report 2 speakers. The per-stage
+  arrays match upstream exactly, so this is an **assembly /
+  clustering-sensitivity** effect of the AHC-seed `clustering_threshold`
+  (default `0.7`, tunable in `SDConfig`) — it is not a stage bug. If exact
+  long-form speaker-count parity matters, this threshold needs per-corpus
+  tuning.
+- **`num_speakers` is not yet enforced.** VBx auto-determines the count; passing
+  `num_speakers` emits a warning and is otherwise ignored.
+
+## Development
+
+Install the dev extras in a **separate venv** — they pull
+`pyannote.audio==4.0.4` + `torch`, which are needed only for golden generation
+and benchmarking, never at runtime:
+
+```bash
+pip install -e '.[dev]'                # SEPARATE venv (pyannote.audio==4.0.4 + torch)
+pytest tests/unit tests/parity         # torch-free
+python scripts/make_goldens.py         # regenerate per-stage goldens (dev venv)
+pytest tests/e2e                       # DER parity (dev venv, needs HF token for gated community-1)
+python scripts/benchmark.py <audio>    # speed table (dev venv)
+```
+
+## License + attribution
+
+- MIT — see [LICENSE](LICENSE).
+- `pyannote_onnx_community/_vbx.py` is vendored from pyannote-audio 4.0.4
+  (Apache-2.0); `pyannote_onnx_community/_plda.py` is vendored from
+  pyannote-audio 4.0.4 (MIT). The original attribution headers are preserved
+  in those files.
+- The segmentation and embedding ONNX models are from the `onnx-community` org
+  on HuggingFace (`onnx-community/pyannote-segmentation-3.0`,
+  `onnx-community/wespeaker-voxceleb-resnet34-LM`); the community-1 PLDA
+  artifacts are from `pyannote/speaker-diarization-community-1`.
