@@ -132,7 +132,7 @@ def _ours_runner(providers: list[str]) -> tuple[Callable[[np.ndarray], int], str
         actual = _providers_label(providers)
 
     def run(wav: np.ndarray) -> int:
-        return len(dia(wav).labels())
+        return len(dia(wav).speaker_diarization.labels())
 
     return run, actual
 
