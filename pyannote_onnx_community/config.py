@@ -22,6 +22,11 @@ class SDConfig:
     vbx_fb: float = 0.8
     plda_repo_id: str = "pyannote/speaker-diarization-community-1"
     embedding_exclude_overlap: bool = True
+    # Min-duration filters for count-based reconstruction → Annotation.
+    # community-1 yaml: to_annotation(min_duration_on=0.0) and
+    # segmentation.min_duration_off=0.0.
+    min_duration_on: float = 0.0
+    min_duration_off: float = 0.0
 
 
 @dataclass

@@ -13,10 +13,13 @@ Order of operations:
      speaker) extract one wespeaker embedding from mask-conditioned fbank
      features. Mirrors upstream pyannote.audio 4.0 community-1's
      ``get_embeddings`` + ``filter_embeddings`` (min_active_ratio=0.2).
-  4. ``cluster_embeddings_vbx`` — PLDA + VBx clustering (unchanged).
-  5. ``_assemble_global_timeline`` — map each (chunk, local) → global cluster
-     label, paint per-chunk per-global-speaker activity, concatenate and
-     extract contiguous runs as final output segments.
+  4. ``cluster_embeddings_vbx`` — PLDA + VBx clustering → labels + centroids,
+     with optional num/min/max-speaker KMeans force-count.
+  5. ``reconstruct_from_chunks`` (in ``_reconstruct``) — count-based
+     reconstruction: overlap-add the soft per-(chunk, local) activations onto
+     the absolute frame grid, keep the top-``count`` speakers per frame, and
+     emit overlap-aware + exclusive timelines. ``assign_speaker_labels`` then
+     maps cluster ids to ``SPEAKER_NN`` and aligns the per-speaker embeddings.
 
 Pure-ONNX community-1 / VBx+PLDA speaker-diarization pipeline.
 """
@@ -28,24 +31,19 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
-from pyannote.core.utils.generators import string_generator
 
 from pyannote_onnx_community._lib import (
     hysteresis_binarize as _hysteresis_binarize,
     iter_windows,
 )
+from pyannote_onnx_community._reconstruct import reconstruct_from_chunks
 from pyannote_onnx_community._vbx import cluster_vbx
 from pyannote_onnx_community.config import SDConfig
 
 
-def get_speaker_string_generator():
-    """A, B, C, ... label generator (pyannote.core string_generator)."""
-    return string_generator()
-
-
 @dataclass
 class DiarizationSegment:
-    """One diarized span. ``speaker`` is an A/B/C label (or None)."""
+    """One diarized span. ``speaker`` is a ``SPEAKER_NN`` label (or None)."""
 
     id: int
     start: float
@@ -55,7 +53,8 @@ class DiarizationSegment:
 __all__ = [
     "ChunkSegmentation",
     "PyannoteOnnxClient",
-    "assemble_output",
+    "SDResult",
+    "assign_speaker_labels",
     "binarize_per_chunk",
     "cluster_embeddings_vbx",
     "extract_embeddings_per_chunk_speaker",
@@ -102,7 +101,6 @@ _WINDOW_STEP = 0.5
 # Powerset binarization thresholds (community-1 yaml: onset == offset == 0.5).
 _ONSET = 0.5
 _OFFSET = 0.5
-_MIN_DURATION_ON = 0.5
 
 _BATCH_SIZE = 32  # matches pyannote.audio Inference default + VAD provider
 
@@ -429,6 +427,54 @@ def extract_embeddings_per_chunk_speaker(
     return np.stack(embeddings).astype(np.float32), metadata
 
 
+def _resolve_cluster_bounds(
+    num_clusters: int | None, min_clusters: int | None, max_clusters: int | None, n: int
+) -> tuple[int | None, int, int]:
+    """Resolve (num, min, max) cluster bounds against ``n`` embeddings.
+
+    Mirrors upstream ``BaseClustering.set_num_clusters``: ``num_clusters`` pins
+    both bounds; otherwise min defaults to 1 and max to ``n``. All clamped to
+    ``[1, n]``.
+    """
+    lo = num_clusters or min_clusters or 1
+    lo = max(1, min(n, lo))
+    hi = num_clusters or max_clusters or n
+    hi = max(1, min(n, hi))
+    if lo > hi:
+        raise ValueError(f"min_clusters ({lo}) must be <= max_clusters ({hi}).")
+    if lo == hi:
+        num_clusters = lo
+    return num_clusters, lo, hi
+
+
+def _kmeans_force(normed: np.ndarray, embeddings: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Force exactly ``k`` clusters via scipy kmeans2 on L2-normed embeddings.
+
+    sklearn-free analogue of upstream's KMeans force-count path. Runs a few
+    deterministic ``minit='++'`` restarts, keeps the lowest-distortion result
+    that yields ``k`` non-empty clusters, and recomputes centroids as the mean
+    of the raw embeddings per cluster. Returns ``(labels, centroids)``.
+    """
+    from scipy.cluster.vq import kmeans2
+
+    best_labels: np.ndarray | None = None
+    best_distortion = np.inf
+    for seed in range(5):
+        centers, labels = kmeans2(normed, k, minit="++", seed=seed, missing="warn")
+        if len(np.unique(labels)) != k:
+            continue
+        distortion = float(np.sum((normed - centers[labels]) ** 2))
+        if distortion < best_distortion:
+            best_distortion = distortion
+            best_labels = labels
+    if best_labels is None:
+        # Degenerate fallback: round-robin assign so all k clusters are non-empty.
+        best_labels = np.arange(normed.shape[0]) % k
+    _, best_labels = np.unique(best_labels, return_inverse=True)
+    centroids = np.stack([embeddings[best_labels == c].mean(axis=0) for c in range(k)]).astype(np.float32)
+    return best_labels.astype(np.int64), centroids
+
+
 def cluster_embeddings_vbx(
     embeddings: np.ndarray,
     *,
@@ -437,7 +483,10 @@ def cluster_embeddings_vbx(
     fa: float,
     fb: float,
     max_iters: int = 20,
-) -> np.ndarray:
+    num_clusters: int | None = None,
+    min_clusters: int | None = None,
+    max_clusters: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """PLDA + VBx clustering (pyannote.audio 4.0 community-1 algorithm).
 
     Mirrors the reference implementation in
@@ -464,16 +513,26 @@ def cluster_embeddings_vbx(
         fb: VBx ``Fb`` hyper-parameter (community-1 default ``0.8``).
         max_iters: VBx iteration cap (upstream uses 20).
 
+        num_clusters: pin the exact speaker count (overrides auto).
+        min_clusters / max_clusters: bounds; ignored when ``num_clusters`` set.
+
     Returns:
-        ``(N,)`` int64 array of cluster labels. Empty input returns empty
-        array; single input returns ``[0]``.
+        ``(labels, centroids)`` — ``labels`` is ``(N,)`` int64; ``centroids`` is
+        ``(num_speakers, D)`` float32 (one raw-embedding centroid per speaker,
+        indexed by label). Empty input returns empty arrays; single input
+        returns ``([0], embeddings[:1])``.
     """
+    embedding_dim = embeddings.shape[1] if embeddings.ndim == 2 else 0
     if embeddings.shape[0] == 0:
-        return np.array([], dtype=np.int64)
+        return np.array([], dtype=np.int64), np.zeros((0, embedding_dim), dtype=np.float32)
     if embeddings.shape[0] == 1:
-        return np.array([0], dtype=np.int64)
+        return np.array([0], dtype=np.int64), embeddings.astype(np.float32).copy()
 
     logger = logging.getLogger("pyannote_onnx_sd")
+    n = embeddings.shape[0]
+    num_clusters, min_clusters, max_clusters = _resolve_cluster_bounds(
+        num_clusters, min_clusters, max_clusters, n
+    )
 
     # AHC on L2-normalised embeddings (matches upstream VBxClustering)
     normed = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
@@ -489,167 +548,139 @@ def cluster_embeddings_vbx(
     keep = pi > 1e-7
     if not keep.any():
         # Degenerate: fall back to AHC seed labels
-        return ahc_clusters.astype(np.int64)
+        labels = ahc_clusters.astype(np.int64)
+        centroids = _centroids_from_labels(embeddings, labels)
+        return labels, centroids
 
     kept_indices = np.where(keep)[0]
     labels_in_kept = gamma[:, keep].argmax(axis=1)
     labels = kept_indices[labels_in_kept].astype(np.int64)
+    _, labels = np.unique(labels, return_inverse=True)
+    auto_num = len(np.unique(labels))
+
+    # Force-count via KMeans only when the auto count is out of bounds or pinned
+    # (mirrors upstream VBxClustering's optional KMeans re-cluster).
+    if auto_num < min_clusters:
+        num_clusters = min_clusters
+    elif auto_num > max_clusters:
+        num_clusters = max_clusters
+    if num_clusters and num_clusters != auto_num:
+        labels, centroids = _kmeans_force(normed, embeddings, num_clusters)
+    else:
+        centroids = _centroids_from_labels(embeddings, labels)
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(
-            "cluster_vbx: ahc=%d → vbx=%d speakers (n=%d, threshold=%.2f, Fa=%.3f, Fb=%.3f)",
+            "cluster_vbx: ahc=%d → vbx=%d → out=%d speakers (n=%d, threshold=%.2f, Fa=%.3f, Fb=%.3f)",
             len(np.unique(ahc_clusters)),
-            int(keep.sum()),
-            embeddings.shape[0],
+            auto_num,
+            len(np.unique(labels)),
+            n,
             threshold,
             fa,
             fb,
         )
 
-    return labels
+    return labels, centroids
 
 
-_MERGE_GAP_SECONDS = 0.5
+def _centroids_from_labels(embeddings: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """Mean raw embedding per cluster id, indexed by label (0..max)."""
+    k = int(labels.max()) + 1 if labels.size else 0
+    return np.stack([embeddings[labels == c].mean(axis=0) for c in range(k)]).astype(np.float32)
 
 
-def _build_speaker_mapping(num_speakers: int) -> dict[int, str]:
-    """Map cluster id → A, B, C, ... using the standard generator."""
-    gen = get_speaker_string_generator()
-    return {i: next(gen) for i in range(num_speakers)}
+def assign_speaker_labels(
+    speaker_segments: list[tuple[float, float, int]],
+    exclusive_segments: list[tuple[float, float, int]],
+    centroids: np.ndarray,
+) -> tuple[list[tuple[float, float, str]], list[tuple[float, float, str]], np.ndarray, list[str]]:
+    """Map integer cluster ids → ``SPEAKER_NN`` in sorted-id order.
 
-
-def assemble_output(
-    segments_with_clusters: list[tuple[float, float, int]],
-) -> list[DiarizationSegment]:
-    """Group, merge, map clusters to speaker labels, return DiarizationSegment list.
-
-    Args:
-        segments_with_clusters: ``(start_seconds, end_seconds, cluster_id)``.
-
-    Behavior:
-      - Sort by start time.
-      - Merge consecutive segments sharing a cluster id when gap < 0.5s.
-      - Assign sequential SPEAKER_NN labels to clusters in order of first
-        appearance using ``get_speaker_string_generator`` (A, B, C, ...).
+    Mirrors upstream's ``classes()`` mapping zipped with sorted
+    ``diarization.labels()``: the global ids present in the (overlap-aware)
+    speaker timeline are sorted, the i-th becomes ``SPEAKER_{i:02d}``, and the
+    returned embeddings are reordered to match. Returns
+    ``(labeled_speaker, labeled_exclusive, ordered_embeddings, names)``.
     """
-    if not segments_with_clusters:
-        return []
+    present = sorted({cid for _, _, cid in speaker_segments})
+    id_to_name = {cid: f"SPEAKER_{rank:02d}" for rank, cid in enumerate(present)}
+    names = [id_to_name[cid] for cid in present]
 
-    sorted_segs = sorted(segments_with_clusters, key=lambda s: s[0])
+    def _relabel(segs):
+        return [(s, e, id_to_name[cid]) for s, e, cid in segs if cid in id_to_name]
 
-    merged: list[list[float | int]] = []
-    for start, end, cluster in sorted_segs:
-        if merged and merged[-1][2] == cluster and (start - merged[-1][1]) < _MERGE_GAP_SECONDS:
-            merged[-1][1] = end
-        else:
-            merged.append([start, end, cluster])
-
-    # Map cluster ids to speakers in first-appearance order
-    seen_clusters: list[int] = []
-    for _start, _end, cluster in merged:
-        if cluster not in seen_clusters:
-            seen_clusters.append(cluster)
-    cluster_to_speaker = dict(zip(seen_clusters, _build_speaker_mapping(len(seen_clusters)).values(), strict=False))
-
-    return [
-        DiarizationSegment(
-            id=idx,
-            start=float(start),
-            end=float(end),
-            speaker=cluster_to_speaker[int(cluster)],
-        )
-        for idx, (start, end, cluster) in enumerate(merged)
-    ]
+    if centroids.shape[0] and present:
+        ordered_embeddings = centroids[present]
+    else:
+        ordered_embeddings = np.zeros((0, centroids.shape[1] if centroids.ndim == 2 else 0), dtype=np.float32)
+    return _relabel(speaker_segments), _relabel(exclusive_segments), ordered_embeddings, names
 
 
-def _runs_from_active_mask(
-    active: np.ndarray,
-    frame_offsets_sec: np.ndarray,
-    frame_duration: float,
-) -> list[tuple[float, float]]:
-    """Extract (start_sec, end_sec) for contiguous runs of True in ``active``."""
-    if not active.any():
-        return []
-    runs: list[tuple[float, float]] = []
-    in_run = False
-    start_idx = 0
-    for i, flag in enumerate(active):
-        if flag and not in_run:
-            start_idx = i
-            in_run = True
-        elif not flag and in_run:
-            runs.append((float(frame_offsets_sec[start_idx]), float(frame_offsets_sec[i - 1] + frame_duration)))
-            in_run = False
-    if in_run:
-        runs.append((float(frame_offsets_sec[start_idx]), float(frame_offsets_sec[-1] + frame_duration)))
-    return runs
+@dataclass
+class SDResult:
+    """Structured diarization result returned by :class:`PyannoteOnnxClient`."""
+
+    speaker: list[DiarizationSegment]  # overlap-aware timeline
+    exclusive: list[DiarizationSegment]  # non-overlapping timeline (for ASR)
+    embeddings: np.ndarray  # (num_speakers, dim), in ``speaker_names`` order
+    speaker_names: list[str]  # SPEAKER_00, SPEAKER_01, ...
 
 
-def _assemble_global_timeline(
+def _build_reconstruction_inputs(
     *,
     chunks: list[ChunkSegmentation],
     metadata: list[EmbeddingMetadata],
     labels: np.ndarray,
     frame_duration: float,
-    min_duration_on: float,
     audio_duration: float,
-) -> list[DiarizationSegment]:
-    """Paint per-chunk per-global-speaker activity, then extract segments.
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[int], int, int]:
+    """Build per-chunk soft / binary / label arrays for count-based reconstruction.
 
-    For each (chunk, local speaker) we have a global cluster label from the
-    VBx output. Build a per-chunk activity tensor of shape
-    ``(num_global_speakers, frames_per_window)`` by OR-ing in each local
-    speaker's binary mask under their assigned global label, then walk the
-    timeline to extract contiguous runs per global speaker.
-
-    Frames covered by multiple chunks (via overlapping windows) are OR-ed
-    together at the absolute frame grid — preserving any chunk that fired the
-    speaker. Runs shorter than ``min_duration_on`` are dropped.
+    For every chunk produces ``(frames, NUM_LOCAL_SPEAKERS)`` soft per-local
+    activations (marginal probability) and 0/1 binarized activity, plus a
+    ``(NUM_LOCAL_SPEAKERS,)`` map from local speaker → global cluster id
+    (``-2`` when the local speaker was filtered out before clustering).
+    Returns ``(soft, binary, labels_per_chunk, offsets_frames, total_frames,
+    num_global)``.
     """
-    if not metadata or not chunks:
-        return []
-
-    # Group metadata by chunk for efficient lookup
-    by_chunk: dict[int, list[tuple[EmbeddingMetadata, int]]] = {}
+    # (chunk_idx, local_speaker_id) → global cluster label
+    label_lookup: dict[tuple[int, int], int] = {}
     for meta, label in zip(metadata, labels.tolist(), strict=True):
-        by_chunk.setdefault(meta.chunk_idx, []).append((meta, int(label)))
-
-    global_labels = sorted({int(label) for label in labels.tolist()})
-    if not global_labels:
-        return []
-    label_to_row = {label: row for row, label in enumerate(global_labels)}
-    num_global = len(global_labels)
+        label_lookup[(meta.chunk_idx, meta.local_speaker_id)] = int(label)
 
     frames_per_window = chunks[0].probs.shape[0]
-    last_chunk = chunks[-1]
-    # iter_windows zero-pads the final window, so the padded grid can extend
-    # past the real audio. Clamp the frame grid back to the true duration so
-    # segments never run past the input (P1).
-    padded_frames = round((last_chunk.offset_sec + frames_per_window * frame_duration) / frame_duration)
+    padded_frames = round((chunks[-1].offset_sec + frames_per_window * frame_duration) / frame_duration)
     total_frames = min(padded_frames, round(audio_duration / frame_duration))
-    if total_frames <= 0:
-        return []
-    activity = np.zeros((num_global, total_frames), dtype=bool)
+    num_global = int(labels.max()) + 1 if labels.size else 0
 
-    for chunk_idx, entries in by_chunk.items():
-        chunk = chunks[chunk_idx]
-        start_frame = round(chunk.offset_sec / frame_duration)
-        end_frame = min(start_frame + frames_per_window, total_frames)
-        n_frames = end_frame - start_frame
-        if n_frames <= 0:
-            continue
-        for meta, label in entries:
-            row = label_to_row[label]
-            activity[row, start_frame:end_frame] |= meta.frame_mask[:n_frames]
+    soft_per_chunk: list[np.ndarray] = []
+    binary_per_chunk: list[np.ndarray] = []
+    labels_per_chunk: list[np.ndarray] = []
+    offsets_frames: list[int] = []
+    for chunk_idx, chunk in enumerate(chunks):
+        per_speaker = _per_speaker_probability(chunk.probs)  # {1,2,3: (frames,)}
+        soft = np.stack([per_speaker[s] for s in (1, 2, 3)], axis=1)
+        binary = np.stack(
+            [_hysteresis_binarize(per_speaker[s], onset=_ONSET, offset=_OFFSET) for s in (1, 2, 3)],
+            axis=1,
+        ).astype(np.float64)
+        chunk_labels = np.array([label_lookup.get((chunk_idx, s), -2) for s in (1, 2, 3)], dtype=np.int64)
+        soft_per_chunk.append(soft)
+        binary_per_chunk.append(binary)
+        labels_per_chunk.append(chunk_labels)
+        offsets_frames.append(round(chunk.offset_sec / frame_duration))
 
-    frame_offsets_sec = np.arange(total_frames) * frame_duration
-    segments_with_clusters: list[tuple[float, float, int]] = []
-    for row, label in enumerate(global_labels):
-        for start_sec, end_sec in _runs_from_active_mask(activity[row], frame_offsets_sec, frame_duration):
-            if (end_sec - start_sec) >= min_duration_on:
-                segments_with_clusters.append((start_sec, min(end_sec, audio_duration), label))
+    return soft_per_chunk, binary_per_chunk, labels_per_chunk, offsets_frames, total_frames, num_global
 
-    return assemble_output(segments_with_clusters)
+
+def _segments_to_diarization(labeled: list[tuple[float, float, str]], audio_duration: float) -> list[DiarizationSegment]:
+    """Convert ``(start, end, speaker_name)`` tuples to sorted DiarizationSegments."""
+    ordered = sorted(labeled, key=lambda s: (s[0], s[1]))
+    return [
+        DiarizationSegment(id=idx, start=float(start), end=float(min(end, audio_duration)), speaker=name)
+        for idx, (start, end, name) in enumerate(ordered)
+    ]
 
 
 @dataclass
@@ -679,8 +710,21 @@ class PyannoteOnnxClient:
                 )
         return self.plda
 
-    def __call__(self, *, audio_input: np.ndarray, sample_rate: int) -> list[DiarizationSegment]:
+    def __call__(
+        self,
+        *,
+        audio_input: np.ndarray,
+        sample_rate: int,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        hook=None,
+    ) -> SDResult:
         logger = logging.getLogger("pyannote_onnx_sd")
+
+        def _emit(step: str, artifact=None):
+            if hook is not None:
+                hook(step, artifact)
 
         logger.debug(
             "audio shape=%s dtype=%s duration=%.1fs",
@@ -689,7 +733,7 @@ class PyannoteOnnxClient:
             audio_input.size / sample_rate if audio_input.size else 0,
         )
         if audio_input.size == 0:
-            return []
+            return _empty_result()
 
         # 1. Per-chunk segmentation forward pass
         chunks, frame_duration = run_segmentation(
@@ -700,12 +744,13 @@ class PyannoteOnnxClient:
             window_step=_WINDOW_STEP,
         )
         if not chunks:
-            return []
+            return _empty_result()
+        _emit("segmentation", chunks)
 
         # 2. Per-chunk per-local-speaker binarization + single-active mask
         speaker_masks = binarize_per_chunk(chunks, onset=_ONSET, offset=_OFFSET)
         if not speaker_masks:
-            return []
+            return _empty_result()
 
         # 3. Per-(chunk, local) embedding extraction with mask conditioning
         embeddings, metadata = extract_embeddings_per_chunk_speaker(
@@ -716,33 +761,66 @@ class PyannoteOnnxClient:
             embedding_exclude_overlap=self.config.embedding_exclude_overlap,
         )
         if embeddings.shape[0] == 0:
-            return []
+            return _empty_result()
+        _emit("embeddings", embeddings)
 
-        # 4. PLDA + VBx clustering (community-1 algorithm)
+        # 4. PLDA + VBx clustering (community-1 algorithm) → labels + centroids
         plda = self._load_plda()
-        labels = cluster_embeddings_vbx(
+        labels, centroids = cluster_embeddings_vbx(
             embeddings,
             plda=plda,
             threshold=self.config.clustering_threshold,
             fa=self.config.vbx_fa,
             fb=self.config.vbx_fb,
+            num_clusters=num_speakers,
+            min_clusters=min_speakers,
+            max_clusters=max_speakers,
         )
+        _emit("clustering", labels)
 
-        # 5. Reconstruct timeline by painting per-frame per-global-speaker activity
-        out = _assemble_global_timeline(
+        # 5. Count-based reconstruction → overlap-aware + exclusive timelines
+        audio_duration = audio_input.size / sample_rate
+        soft, binary, labels_per_chunk, offsets, total_frames, num_global = _build_reconstruction_inputs(
             chunks=chunks,
             metadata=metadata,
             labels=labels,
             frame_duration=frame_duration,
-            min_duration_on=_MIN_DURATION_ON,
-            audio_duration=audio_input.size / sample_rate,
+            audio_duration=audio_duration,
         )
+        speaker_segs, exclusive_segs = reconstruct_from_chunks(
+            soft_per_chunk=soft,
+            binary_per_chunk=binary,
+            labels_per_chunk=labels_per_chunk,
+            offsets_frames=offsets,
+            total_frames=total_frames,
+            num_global=num_global,
+            frame_duration=frame_duration,
+            min_duration_on=self.config.min_duration_on,
+            min_duration_off=self.config.min_duration_off,
+        )
+
+        # 6. SPEAKER_NN labelling (sorted-id order) + embedding alignment
+        labeled_sp, labeled_ex, ordered_emb, names = assign_speaker_labels(
+            speaker_segs, exclusive_segs, centroids
+        )
+        result = SDResult(
+            speaker=_segments_to_diarization(labeled_sp, audio_duration),
+            exclusive=_segments_to_diarization(labeled_ex, audio_duration),
+            embeddings=ordered_emb,
+            speaker_names=names,
+        )
+        _emit("diarization", result.speaker)
         logger.info(
-            "pyannote_onnx SD: %d chunks → %d (chunk,speaker) masks → %d embeddings → %d speakers → %d output segments",
+            "pyannote_onnx SD: %d chunks → %d (chunk,speaker) masks → %d embeddings → %d speakers → %d/%d segments",
             len(chunks),
             len(speaker_masks),
             embeddings.shape[0],
-            len(set(labels.tolist())),
-            len(out),
+            len(names),
+            len(result.speaker),
+            len(result.exclusive),
         )
-        return out
+        return result
+
+
+def _empty_result() -> SDResult:
+    return SDResult(speaker=[], exclusive=[], embeddings=np.zeros((0, 256), dtype=np.float32), speaker_names=[])

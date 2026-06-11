@@ -9,39 +9,32 @@ Run with the dev venv:
 Why a 0.25s collar (DiarizationErrorRate(collar=0.25))
 ------------------------------------------------------------------------------
 Per-stage arrays are already proven EXACT against upstream (tests/parity:
-l2_norm/VBx/PLDA max abs diff 0.0; fbank/segmentation cosine ~1.0). So any
-end-to-end DER is pure assembly divergence, dominated by *boundary jitter*:
-our per-chunk segmentation→stitch produces speech/silence edges that differ
-from the full-tensor PyTorch pipeline by a few tens of ms. Counting that as
-error inflates DER even though no frame is mis-assigned to the wrong speaker.
-A 0.25s collar (the conventional diarization-DER reporting standard, NIST RT)
-excludes a ±0.25s window around every reference boundary, so the score reflects
-speaker-assignment quality rather than edge placement. We therefore assert on
-the collar'd DER and keep the no-collar number only for context in the print.
+l2_norm/VBx/PLDA max abs diff 0.0; fbank/segmentation cosine ~1.0). Since the
+output stage now mirrors upstream's count-based reconstruction
+(``_reconstruct.reconstruct_from_chunks``), the remaining end-to-end DER is
+dominated by *boundary jitter*: our per-chunk segmentation produces
+speech/silence edges that differ from the full-tensor PyTorch pipeline by a few
+tens of ms. Counting that as error inflates DER even though no frame is
+mis-assigned to the wrong speaker. A 0.25s collar (the conventional
+diarization-DER reporting standard, NIST RT) excludes a ±0.25s window around
+every reference boundary, so the score reflects speaker-assignment quality
+rather than edge placement. We assert on the collar'd DER and keep the
+no-collar number only for context in the print.
 
 ------------------------------------------------------------------------------
 Observed evidence (ours vs upstream community-1 PyTorch, pyannote.audio 4.0.4)
 ------------------------------------------------------------------------------
-                              DER@0     DER@0.25   ours_spk  ref_spk
-  clip.wav (60s, committed)   0.2803    0.2392        2         2     <- used
-  test_audio_10.m4a  120s     0.2501    0.2041        2         4
-  test_audio_10.m4a  180s     0.1685    0.1284        2         4
-  test_audio_10.m4a  240s     0.0853    0.0551        3         4
-  test_audio_10.m4a  300s     0.1292    0.0999        4         6
+                              DER@0.25   ours_spk  ref_spk
+  clip.wav (60s, committed)   0.1487        2         2     <- used
 
-Reading: the 0.25s collar removes ~0.04 of boundary jitter on the 60s clip
-(0.2803 -> 0.2392). On longer audio the collar'd DER falls much further
-(<0.10 at 240-300s) BUT upstream keeps discovering speakers as the conversation
-develops, so |ours - ref| grows to 2 on every cut of test_audio_10.m4a — that
-breaks the robust speaker-count agreement signal we want to assert. The 60s
-committed clip is the only input where speaker count agrees EXACTLY (2 vs 2),
-so it is the default the committed test scores against.
+Adopting the count-based reconstruction (overlap-aware top-``count`` selection)
+to replace the earlier binary-mask OR assembly cut the committed-clip collar'd
+DER from 0.2392 to 0.1487, with speaker count still agreeing exactly (2 vs 2).
 
-Threshold: observed collar'd DER on the committed clip is 0.2392; with ~0.08
-headroom for run-to-run / model-cache variation (0.2392 + 0.08 = 0.3192) the
-clean ceiling is 0.35. An optional longer clip can be supplied via
-PYANNOTE_ONNX_E2E_AUDIO (a path); the same 0.35 ceiling applies and is well
-inside the collar'd DER observed on the longer cuts above.
+Threshold: observed collar'd DER on the committed clip is 0.1487; with ~0.08
+headroom for run-to-run / model-cache variation (0.1487 + 0.08 = 0.2287) the
+clean ceiling is 0.25. An optional longer clip can be supplied via
+PYANNOTE_ONNX_E2E_AUDIO (a path); the same 0.25 ceiling applies.
 """
 
 import os
@@ -53,15 +46,14 @@ import pytest
 pytest.importorskip("pyannote.audio")
 pytest.importorskip("pyannote.metrics")
 pytest.importorskip("torch")
-pytest.importorskip("soundfile")
 
 CLIP = Path(__file__).resolve().parents[1] / "goldens" / "clip.wav"
 
 # 0.25s NIST/RT-standard collar; see module docstring for the rationale.
 COLLAR = 0.25
-# Evidence-based ceiling: collar'd DER on the committed clip is 0.2392; +~0.08
-# headroom rounds to a clean 0.35.
-DER_CEIL = 0.35
+# Evidence-based ceiling: collar'd DER on the committed clip is 0.1487 (with the
+# count-based reconstruction); +~0.08 headroom rounds to a clean 0.25.
+DER_CEIL = 0.25
 
 
 def _resolve_token():
@@ -125,7 +117,7 @@ def test_der_drift_and_speaker_count():
     # Older versions return a bare Annotation.
     ref = getattr(up_out, "speaker_diarization", up_out)
 
-    ours = ONNXSpeakerDiarization()(wav)
+    ours = ONNXSpeakerDiarization()(wav).speaker_diarization
 
     der = DiarizationErrorRate(collar=COLLAR)(ref, ours)
     n_ours, n_ref = len(ours.labels()), len(ref.labels())

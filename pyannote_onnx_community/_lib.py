@@ -115,7 +115,7 @@ def iter_windows(
     extend past the real audio. Consumers that build a timeline from these
     windows MUST clamp their output back to the true ``audio.size / sample_rate``
     duration, or they will report activity past the end of the input. See
-    ``_assemble_global_timeline`` (SD) and ``_stitched_speech_probability``
+    ``_build_reconstruction_inputs`` (SD) and ``_stitched_speech_probability``
     (VAD) for the two existing clamps.
     """
     if audio.size == 0:

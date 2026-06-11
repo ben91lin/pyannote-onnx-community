@@ -13,7 +13,6 @@ from pyannote_onnx_community._pipeline import (
     ChunkSegmentation,
     ChunkSpeakerMask,
     EmbeddingMetadata,
-    assemble_output,
     binarize_per_chunk,
     cluster_embeddings_vbx,
     extract_embeddings_per_chunk_speaker,
@@ -500,7 +499,7 @@ class _MockPLDA:
 
 
 def test_cluster_embeddings_vbx_empty_returns_empty():
-    labels = cluster_embeddings_vbx(
+    labels, centroids = cluster_embeddings_vbx(
         np.zeros((0, 256), dtype=np.float32),
         plda=_MockPLDA(),
         threshold=0.6,
@@ -508,10 +507,11 @@ def test_cluster_embeddings_vbx_empty_returns_empty():
         fb=0.8,
     )
     assert labels.size == 0
+    assert centroids.shape[0] == 0
 
 
 def test_cluster_embeddings_vbx_single_returns_single():
-    labels = cluster_embeddings_vbx(
+    labels, centroids = cluster_embeddings_vbx(
         np.ones((1, 256), dtype=np.float32),
         plda=_MockPLDA(),
         threshold=0.6,
@@ -519,46 +519,7 @@ def test_cluster_embeddings_vbx_single_returns_single():
         fb=0.8,
     )
     assert labels.tolist() == [0]
-
-
-# ---------------------------------------------------------------------------
-# assemble_output (unchanged behavior)
-# ---------------------------------------------------------------------------
-
-
-from pyannote_onnx_community._pipeline import DiarizationSegment  # noqa: E402
-
-
-def test_assemble_output_maps_cluster_to_speaker_label():
-    out = assemble_output([(0.0, 1.0, 0), (1.0, 2.0, 1), (2.0, 3.0, 0)])
-    assert len(out) == 3
-    assert all(isinstance(s, DiarizationSegment) for s in out)
-    speaker_labels = {s.speaker for s in out}
-    assert len(speaker_labels) == 2
-    # First and third (cluster 0) share a speaker
-    assert out[0].speaker == out[2].speaker
-
-
-def test_assemble_output_merges_same_cluster_close_in_time():
-    out = assemble_output([(0.0, 1.0, 0), (1.2, 2.0, 0)])
-    assert len(out) == 1
-    assert out[0].start == 0.0
-    assert out[0].end == 2.0
-
-
-def test_assemble_output_keeps_separate_when_gap_above_threshold():
-    out = assemble_output([(0.0, 1.0, 0), (1.6, 2.0, 0)])
-    assert len(out) == 2
-
-
-def test_assemble_output_empty_list_returns_empty():
-    assert assemble_output([]) == []
-
-
-def test_assemble_output_assigns_increasing_id():
-    out = assemble_output([(0.0, 1.0, 0), (2.0, 3.0, 1)])
-    assert out[0].id == 0
-    assert out[1].id == 1
+    assert centroids.shape == (1, 256)
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +550,7 @@ def _seg_session_one_speaker(num_frames_per_window: int = 100) -> MagicMock:
 
 
 def test_client_single_speaker_yields_segments():
-    """Audio entirely speaker 1 → at least one DiarizationSegment."""
+    """Audio entirely speaker 1 → at least one overlap-aware segment."""
     pytest.importorskip("kaldi_native_fbank")
     seg = _seg_session_one_speaker()
     emb = MagicMock()
@@ -601,17 +562,41 @@ def test_client_single_speaker_yields_segments():
 
     result = client(audio_input=audio, sample_rate=16000)
 
-    assert len(result) >= 1
-    assert all(s.speaker for s in result)
+    assert len(result.speaker) >= 1
+    assert all(s.speaker for s in result.speaker)
+    # SPEAKER_NN label format
+    assert all(s.speaker.startswith("SPEAKER_") for s in result.speaker)
+    # one embedding per named speaker
+    assert result.embeddings.shape[0] == len(result.speaker_names)
 
 
-def test_client_empty_audio_returns_empty_list():
+def test_client_exclusive_timeline_has_no_overlap():
+    """Exclusive timeline assigns at most one speaker at any instant."""
+    pytest.importorskip("kaldi_native_fbank")
+    seg = _seg_session_one_speaker()
+    emb = MagicMock()
+    emb.run = MagicMock(return_value=[np.full((1, 256), 1.0, dtype=np.float32)])
+
+    cfg = SDConfig()
+    client = PyannoteOnnxClient(seg_session=seg, emb_session=emb, config=cfg, plda=_MockPLDA())
+    audio = np.zeros(16000 * 10, dtype=np.float32)
+
+    result = client(audio_input=audio, sample_rate=16000)
+
+    spans = sorted((s.start, s.end) for s in result.exclusive)
+    for (_, prev_end), (next_start, _) in zip(spans, spans[1:]):
+        assert next_start >= prev_end - 1e-6
+
+
+def test_client_empty_audio_returns_empty_result():
     seg = MagicMock()
     emb = MagicMock()
     cfg = SDConfig()
     client = PyannoteOnnxClient(seg_session=seg, emb_session=emb, config=cfg)
     audio = np.array([], dtype=np.float32)
-    assert client(audio_input=audio, sample_rate=16000) == []
+    result = client(audio_input=audio, sample_rate=16000)
+    assert result.speaker == []
+    assert result.exclusive == []
     seg.run.assert_not_called()
     emb.run.assert_not_called()
 
@@ -630,12 +615,12 @@ def test_client_does_not_emit_segments_past_audio_end():
 
     result = client(audio_input=audio, sample_rate=16000)
 
-    assert len(result) >= 1
+    assert len(result.speaker) >= 1
     frame_duration = 5.0 / 100
-    assert max(s.end for s in result) <= 1.0 + frame_duration
+    assert max(s.end for s in result.speaker) <= 1.0 + frame_duration
 
 
-def test_client_no_speech_logits_returns_empty_list():
+def test_client_no_speech_logits_returns_empty_result():
     """All frames non-speech (class 0 wins after softmax) → no segments."""
     seg = MagicMock()
     silent_template = np.full((1, 100, 7), -10.0, dtype=np.float32)
@@ -651,7 +636,8 @@ def test_client_no_speech_logits_returns_empty_list():
     cfg = SDConfig()
     client = PyannoteOnnxClient(seg_session=seg, emb_session=emb, config=cfg)
     audio = np.zeros(16000 * 5, dtype=np.float32)
-    assert client(audio_input=audio, sample_rate=16000) == []
+    result = client(audio_input=audio, sample_rate=16000)
+    assert result.speaker == []
     emb.run.assert_not_called()
 
 
