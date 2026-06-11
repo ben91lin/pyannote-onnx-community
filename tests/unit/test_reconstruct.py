@@ -125,3 +125,23 @@ def test_reconstruct_inactive_local_speaker_skipped():
     labels = [np.array([0, -2])]
     speaker, _ = _reconstruct(soft, binary, labels, num_global=1)
     assert speaker == [(0.0, 1.0, 0)]
+
+
+def test_reconstruct_filtered_local_does_not_inflate_count():
+    # Only a filtered (-2) local is active: count must not count it and turn on
+    # an arbitrary global speaker from all-zero activations.
+    soft = [np.array([[0.0, 0.9]])]
+    binary = [np.array([[0.0, 1.0]])]
+    labels = [np.array([0, -2])]
+    speaker, exclusive = _reconstruct(soft, binary, labels, num_global=1)
+    assert speaker == []
+    assert exclusive == []
+
+
+def test_reconstruct_labelled_local_still_counted():
+    # Sanity counterpart: a labelled active local is still counted and painted.
+    soft = [np.array([[0.9, 0.0]])]
+    binary = [np.array([[1.0, 0.0]])]
+    labels = [np.array([0, -2])]
+    speaker, _ = _reconstruct(soft, binary, labels, num_global=1)
+    assert speaker == [(0.0, 1.0, 0)]

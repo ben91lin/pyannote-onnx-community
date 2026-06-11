@@ -5,7 +5,7 @@ input is decoded + resampled via PyAV (no torch) and normalised to float32.
 
 ndarray input is trusted, not converted (matching whisper's contract): it must
 already be a floating-point waveform, normalised to [-1, 1], at the target
-`sample_rate` (mono, or multichannel which is downmixed). It is NOT resampled or
+`sample_rate` (mono 1-D, or 2-D ``(channels, samples)`` which is downmixed). It is NOT resampled or
 PCM-normalised — pass a path/file object if you need decoding. Integer PCM or
 clearly un-normalised arrays raise ``ValueError`` rather than producing
 plausible-but-wrong output.
@@ -22,9 +22,12 @@ import numpy as np
 def _downmix(wav: np.ndarray) -> np.ndarray:
     if wav.ndim == 1:
         return wav
-    # (channels, samples) or (samples, channels) -> average the channel axis.
-    axis = 0 if wav.shape[0] < wav.shape[-1] else -1
-    return wav.mean(axis=axis)
+    if wav.ndim == 2:
+        # 2-D is (channels, samples) -> average the channel axis.
+        return wav.mean(axis=0)
+    raise ValueError(
+        f"ndarray audio must be 1-D (mono) or 2-D (channels, samples), got {wav.ndim}-D."
+    )
 
 
 def load_audio(audio, sample_rate: int = 16000) -> np.ndarray:

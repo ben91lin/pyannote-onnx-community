@@ -126,12 +126,18 @@ def reconstruct_from_chunks(
     for soft, binary, labels in zip(soft_per_chunk, binary_per_chunk, labels_per_chunk, strict=True):
         frames = soft.shape[0]
         clustered = np.zeros((frames, num_global), dtype=np.float64)
+        labeled = labels >= 0
         for local, label in enumerate(labels.tolist()):
             if label < 0:
                 continue
             clustered[:, label] = np.maximum(clustered[:, label], soft[:, local])
         clustered_per_chunk.append(clustered)
-        count_sums_per_chunk.append(binary.sum(axis=1, keepdims=True).astype(np.float64))
+        # Count only labelled locals so the speaker count stays consistent with the
+        # clustered activations; a frame where only filtered (-2) locals are active
+        # must not inflate the count and hallucinate a speaker.
+        count_sums_per_chunk.append(
+            binary[:, labeled].sum(axis=1, keepdims=True).astype(np.float64)
+        )
 
     activations = aggregate_overlap_add(
         clustered_per_chunk, offsets_frames, total_frames=total_frames, average=False
