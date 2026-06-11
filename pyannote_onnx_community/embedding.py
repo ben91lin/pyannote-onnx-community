@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from pyannote_onnx_community._lib import load_embedding_session, resolve_onnx_path
-from pyannote_onnx_community._pipeline import _compute_fbank
+from pyannote_onnx_community._pipeline import _WESPEAKER_MIN_FBANK_FRAMES, _compute_fbank
 from pyannote_onnx_community.audio import load_audio
 
 EMBEDDING_REPO = "onnx-community/wespeaker-voxceleb-resnet34-LM"
@@ -33,8 +33,20 @@ class ONNXSpeakerEmbedding:
         )
 
     def __call__(self, audio) -> np.ndarray:
+        """Return a 256-d L2-normalised embedding.
+
+        Raises ``ValueError`` for empty or too-short audio: fewer than
+        ``_WESPEAKER_MIN_FBANK_FRAMES`` fbank frames makes the wespeaker ONNX
+        session emit NaNs, so reject the input rather than return garbage.
+        """
         wav = load_audio(audio, sample_rate=self.sample_rate)
         feats = _compute_fbank(wav, self.sample_rate)
+        if feats.shape[0] < _WESPEAKER_MIN_FBANK_FRAMES:
+            raise ValueError(
+                f"audio too short for embedding: produced {feats.shape[0]} fbank "
+                f"frame(s), need >= {_WESPEAKER_MIN_FBANK_FRAMES} (~0.4s of "
+                f"{self.sample_rate} Hz audio)"
+            )
         out = self._emb.run(None, {"input_features": feats[np.newaxis, :, :].astype(np.float32)})[0][0]
         norm = float(np.linalg.norm(out))
         return (out / norm).astype(np.float32) if norm > 1e-6 else out.astype(np.float32)

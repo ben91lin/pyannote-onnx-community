@@ -24,6 +24,21 @@ def test_vad_returns_annotation_with_speech():
     assert total > 0
 
 
+def test_vad_short_audio_does_not_exceed_duration():
+    """P1: 1s audio is zero-padded to a full 5s window; VAD output must not
+    report speech past the real 1s input (relaxed durations so the short clip
+    survives filtering — the point under test is the upper bound)."""
+    from pyannote_onnx_community.config import VADConfig
+    from pyannote_onnx_community.vad import ONNXVoiceActivityDetection
+
+    cfg = VADConfig(min_duration_on=0.1, min_duration_off=0.1)
+    vad = ONNXVoiceActivityDetection(seg_session=_FakeSeg(), config=cfg)  # 50 frames/window → 0.1s
+    audio = np.ones(16000 * 1, dtype=np.float32)  # 1s
+    ann = vad(audio)
+    assert len(ann) >= 1
+    assert max(seg.end for seg in ann.get_timeline()) <= 1.0 + 0.1
+
+
 def test_segments_from_active_mask_filters_short():
     from pyannote_onnx_community.vad import _segments_from_active_mask
 

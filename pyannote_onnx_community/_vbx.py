@@ -1,4 +1,4 @@
-"""Vendored from pyannote-audio 4.0.4 (BSD-3-Clause).
+"""Vendored from pyannote-audio 4.0.4 (Apache-2.0).
 
 Source: https://github.com/pyannote/pyannote-audio/blob/4.0.4/src/pyannote/audio/utils/vbx.py
 Original copyright: 2024 CNRS, hervé BREDIN.

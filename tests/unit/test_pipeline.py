@@ -162,6 +162,34 @@ def test_run_segmentation_passes_3d_input_with_channel_dim():
 
 
 # ---------------------------------------------------------------------------
+# _per_speaker_probability (powerset -> per-speaker marginal)
+# ---------------------------------------------------------------------------
+
+
+def test_per_speaker_probability_sums_membership_classes():
+    """Powerset classes are mutually exclusive, so a speaker's marginal is the
+    SUM of the classes it belongs to (matching VAD/upstream), not the max.
+
+    Split mass: A=0.3 (class 1) and A+B=0.3 (class 4). Speaker A's marginal is
+    0.6 (> 0.5 threshold); the old max-based code reported only 0.3 and would
+    have dropped the speaker — a driver of the documented speaker under-count.
+    """
+    from pyannote_onnx_community._pipeline import _per_speaker_probability
+
+    probs = np.zeros((1, 7), dtype=np.float32)
+    probs[0, 1] = 0.3  # A
+    probs[0, 4] = 0.3  # A+B
+    out = _per_speaker_probability(probs)
+
+    # Speaker 1 (A): classes 1, 4, 5 → 0.3 + 0.3 + 0.0 = 0.6
+    np.testing.assert_allclose(out[1][0], 0.6, rtol=1e-6)
+    # Speaker 2 (B): classes 2, 4, 6 → 0.0 + 0.3 + 0.0 = 0.3
+    np.testing.assert_allclose(out[2][0], 0.3, rtol=1e-6)
+    # Speaker 3 (C): classes 3, 5, 6 → 0.0
+    np.testing.assert_allclose(out[3][0], 0.0, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
 # binarize_per_chunk
 # ---------------------------------------------------------------------------
 
@@ -586,6 +614,25 @@ def test_client_empty_audio_returns_empty_list():
     assert client(audio_input=audio, sample_rate=16000) == []
     seg.run.assert_not_called()
     emb.run.assert_not_called()
+
+
+def test_client_does_not_emit_segments_past_audio_end():
+    """P1: short audio (1s) is zero-padded to a full 5s window; the output
+    timeline must clamp back to the real 1s input, not run to 5s."""
+    pytest.importorskip("kaldi_native_fbank")
+    seg = _seg_session_one_speaker()  # 100 frames/window → frame_duration 0.05s
+    emb = MagicMock()
+    emb.run = MagicMock(return_value=[np.full((1, 256), 1.0, dtype=np.float32)])
+
+    cfg = SDConfig()
+    client = PyannoteOnnxClient(seg_session=seg, emb_session=emb, config=cfg, plda=_MockPLDA())
+    audio = np.zeros(16000 * 1, dtype=np.float32)  # 1s, padded to 5s window
+
+    result = client(audio_input=audio, sample_rate=16000)
+
+    assert len(result) >= 1
+    frame_duration = 5.0 / 100
+    assert max(s.end for s in result) <= 1.0 + frame_duration
 
 
 def test_client_no_speech_logits_returns_empty_list():

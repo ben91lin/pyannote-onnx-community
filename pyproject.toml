@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,11 @@ name = "pyannote-onnx-community"
 version = "0.1.0"
 description = "Pure-ONNX pyannote community-1 speaker diarization (VBx + PLDA) — torch-free inference, validated array-for-array against the official PyTorch pipeline."
 readme = "README.md"
-license = { text = "MIT" }
+# SPDX expression (PEP 639): the project is MIT, but it vendors the Apache-2.0
+# file pyannote_onnx_community/_vbx.py, so the distribution as a whole is
+# governed by both. license-files ship the full texts + NOTICE in the dist.
+license = "MIT AND Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "licenses/Apache-2.0.txt"]
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.24",

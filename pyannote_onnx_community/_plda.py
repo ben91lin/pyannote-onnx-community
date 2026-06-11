@@ -1,4 +1,4 @@
-"""Vendored from pyannote-audio 4.0.4 (BSD-3-Clause).
+"""Vendored from pyannote-audio 4.0.4 (MIT).
 
 Source: https://github.com/pyannote/pyannote-audio/blob/4.0.4/src/pyannote/audio/core/plda.py
 Original copyright: 2024-2025 CNRS / pyannoteAI (MIT in upstream).

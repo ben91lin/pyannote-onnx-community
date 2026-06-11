@@ -110,6 +110,13 @@ def iter_windows(
     final window is zero-padded on the right when audio runs short. Empty
     input yields nothing. Caller is responsible for passing mono float32 audio
     at ``sample_rate`` as mono float32.
+
+    Footgun: because the final window is zero-padded, the padded frame grid can
+    extend past the real audio. Consumers that build a timeline from these
+    windows MUST clamp their output back to the true ``audio.size / sample_rate``
+    duration, or they will report activity past the end of the input. See
+    ``_assemble_global_timeline`` (SD) and ``_stitched_speech_probability``
+    (VAD) for the two existing clamps.
     """
     if audio.size == 0:
         return

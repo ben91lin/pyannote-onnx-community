@@ -147,7 +147,10 @@ def _stitched_speech_probability(
         if accum is None:
             frames_per_window = speech.shape[1]
             frame_duration = window_duration / frames_per_window
-            total_frames = max(round(audio_duration / frame_duration), frames_per_window)
+            # Clamp the grid to the real audio duration (>=1 frame). Do NOT pad
+            # out to a full window: for sub-window clips that would let the
+            # trailing-trim below report speech past the true audio end (P1).
+            total_frames = max(round(audio_duration / frame_duration), 1)
             accum = np.zeros(total_frames, dtype=np.float32)
             counts = np.zeros(total_frames, dtype=np.int32)
 

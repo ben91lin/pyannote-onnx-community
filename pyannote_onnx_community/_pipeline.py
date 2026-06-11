@@ -181,19 +181,22 @@ def run_segmentation(
 
 
 def _per_speaker_probability(probs: np.ndarray) -> dict[int, np.ndarray]:
-    """Compute per-speaker probability timeline as max across membership classes.
+    """Compute per-speaker probability timeline as the sum across membership classes.
 
-    Speaker k's probability at frame f = max of probs[f, c] for all classes c
-    whose membership includes speaker k. Using max (rather than sum) avoids
-    inflating probabilities when background overlap-class noise is present,
-    while still correctly propagating high-confidence overlap-class
-    activations.
+    Speaker k's marginal probability at frame f = sum of probs[f, c] for all
+    classes c whose membership includes speaker k. The powerset classes are
+    mutually exclusive (softmax over the 7-class axis), so the speaker marginal
+    is the *sum* of the classes that include them — e.g. P(A active) =
+    P(A) + P(A+B) + P(A+C). This matches the VAD path (``vad.py`` multilabel
+    conversion) and upstream ``pyannote.audio``. Using max here instead would
+    systematically under-estimate the marginal when class mass is split across
+    a speaker's solo and overlap classes, dropping speakers below threshold.
     """
     contributors: dict[int, list[np.ndarray]] = {1: [], 2: [], 3: []}
     for class_idx, members in _OVERLAP_MEMBERSHIP.items():
         for speaker in members:
             contributors[speaker].append(probs[:, class_idx])
-    return {speaker: np.maximum.reduce(arrays).astype(np.float32) for speaker, arrays in contributors.items()}
+    return {speaker: np.add.reduce(arrays).astype(np.float32) for speaker, arrays in contributors.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,6 +592,7 @@ def _assemble_global_timeline(
     labels: np.ndarray,
     frame_duration: float,
     min_duration_on: float,
+    audio_duration: float,
 ) -> list[DiarizationSegment]:
     """Paint per-chunk per-global-speaker activity, then extract segments.
 
@@ -618,7 +622,11 @@ def _assemble_global_timeline(
 
     frames_per_window = chunks[0].probs.shape[0]
     last_chunk = chunks[-1]
-    total_frames = round((last_chunk.offset_sec + frames_per_window * frame_duration) / frame_duration)
+    # iter_windows zero-pads the final window, so the padded grid can extend
+    # past the real audio. Clamp the frame grid back to the true duration so
+    # segments never run past the input (P1).
+    padded_frames = round((last_chunk.offset_sec + frames_per_window * frame_duration) / frame_duration)
+    total_frames = min(padded_frames, round(audio_duration / frame_duration))
     if total_frames <= 0:
         return []
     activity = np.zeros((num_global, total_frames), dtype=bool)
@@ -639,7 +647,7 @@ def _assemble_global_timeline(
     for row, label in enumerate(global_labels):
         for start_sec, end_sec in _runs_from_active_mask(activity[row], frame_offsets_sec, frame_duration):
             if (end_sec - start_sec) >= min_duration_on:
-                segments_with_clusters.append((start_sec, end_sec, label))
+                segments_with_clusters.append((start_sec, min(end_sec, audio_duration), label))
 
     return assemble_output(segments_with_clusters)
 
@@ -727,6 +735,7 @@ class PyannoteOnnxClient:
             labels=labels,
             frame_duration=frame_duration,
             min_duration_on=_MIN_DURATION_ON,
+            audio_duration=audio_input.size / sample_rate,
         )
         logger.info(
             "pyannote_onnx SD: %d chunks → %d (chunk,speaker) masks → %d embeddings → %d speakers → %d output segments",

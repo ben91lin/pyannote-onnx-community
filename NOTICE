@@ -1,0 +1,20 @@
+pyannote-onnx-community
+Copyright (c) 2026 Ben Lin
+
+The bulk of this project is licensed under the MIT License (see LICENSE).
+It additionally bundles the following third-party component under a separate
+license:
+
+------------------------------------------------------------------------------
+pyannote_onnx_community/_vbx.py  —  Apache License 2.0
+------------------------------------------------------------------------------
+
+Vendored from pyannote-audio 4.0.4, licensed under the Apache License, Version
+2.0.
+
+  Source:    https://github.com/pyannote/pyannote-audio/blob/4.0.4/src/pyannote/audio/utils/vbx.py
+  Copyright: 2024 CNRS, Hervé Bredin
+  Lineage:   derived from the VBx project (BUTSpeechFIT/VBx).
+  Changes:   file header + adapted import paths only; algorithm untouched.
+
+A full copy of the Apache License 2.0 is provided in licenses/Apache-2.0.txt.
