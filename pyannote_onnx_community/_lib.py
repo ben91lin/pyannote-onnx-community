@@ -1,7 +1,8 @@
 """ABI surface for ONNX-based Pyannote Speaker Diarization.
 
 Pure ABI layer: zero business logic. Two responsibilities:
-1. ONNX session factories with path-keyed caches (so repeat loads share state).
+1. One process-wide, locked ONNX session cache keyed by ``(path, SessionConfig)``,
+   made fork-safe by an ``after_in_child`` handler.
 2. Sliding-window iteration helper (pure NumPy, deterministic, zero-pads tail).
 
 Mirrors the ``whisper_cpp_lib.py`` discipline — the
@@ -11,11 +12,16 @@ a separate cache module.
 
 from __future__ import annotations
 
+import ctypes
+import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 from huggingface_hub import try_to_load_from_cache
+
+from pyannote_onnx_community.config import SessionConfig
 
 try:
     import onnxruntime
@@ -24,6 +30,8 @@ except ImportError:  # pragma: no cover — gated by extras at install time
 
 
 __all__ = [
+    "clear_session_cache",
+    "get_session",
     "hysteresis_binarize",
     "is_available",
     "iter_windows",
@@ -54,8 +62,8 @@ def hysteresis_binarize(prob: np.ndarray, onset: float, offset: float) -> np.nda
     return active
 
 
-_seg_cache: dict[tuple[str, tuple[str, ...]], onnxruntime.InferenceSession] = {}
-_emb_cache: dict[tuple[str, tuple[str, ...]], onnxruntime.InferenceSession] = {}
+_session_cache: dict[tuple[str, SessionConfig], onnxruntime.InferenceSession] = {}
+_session_lock = threading.Lock()
 
 
 def is_available() -> bool:
@@ -63,38 +71,77 @@ def is_available() -> bool:
     return onnxruntime is not None
 
 
-def _new_session(model_path: str, providers=None) -> onnxruntime.InferenceSession:
+def _new_session(model_path: str, config: SessionConfig) -> onnxruntime.InferenceSession:
     if onnxruntime is None:
         raise ImportError(
             "onnxruntime is required for pyannote_onnx SD provider. "
             "Install via `pip install pyannote-onnx-community`."
         )
     options = onnxruntime.SessionOptions()
-    return onnxruntime.InferenceSession(
-        model_path,
-        sess_options=options,
-        providers=list(providers) if providers else ["CPUExecutionProvider"],
-    )
+    options.intra_op_num_threads = config.intra_op_threads
+    return onnxruntime.InferenceSession(model_path, sess_options=options, providers=config.ort_providers())
 
 
-def load_segmentation_session(model_path: str, providers=None) -> onnxruntime.InferenceSession:
-    """Load (or return cached) segmentation ONNX session keyed by (path, providers)."""
-    key = (model_path, tuple(providers) if providers else ("CPUExecutionProvider",))
-    sess = _seg_cache.get(key)
-    if sess is None:
-        sess = _new_session(model_path, providers=providers)
-        _seg_cache[key] = sess
-    return sess
+def get_session(model_path: str, config: SessionConfig | None = None) -> onnxruntime.InferenceSession:
+    """Return the process-wide session for ``(model_path, config)``, creating it once.
+
+    The lock is held across lookup and creation, so concurrent first calls
+    build a single session.
+    """
+    config = config or SessionConfig()
+    key = (model_path, config)
+    with _session_lock:
+        session = _session_cache.get(key)
+        if session is None:
+            session = _new_session(model_path, config)
+            _session_cache[key] = session
+        return session
 
 
-def load_embedding_session(model_path: str, providers=None) -> onnxruntime.InferenceSession:
-    """Load (or return cached) embedding ONNX session keyed by (path, providers)."""
-    key = (model_path, tuple(providers) if providers else ("CPUExecutionProvider",))
-    sess = _emb_cache.get(key)
-    if sess is None:
-        sess = _new_session(model_path, providers=providers)
-        _emb_cache[key] = sess
-    return sess
+def clear_session_cache() -> None:
+    """Drop the cache's session references. No inference may be running on them."""
+    with _session_lock:
+        _session_cache.clear()
+
+
+def _config_from_providers(providers) -> SessionConfig:
+    return SessionConfig(providers=tuple(providers)) if providers else SessionConfig()
+
+
+def load_segmentation_session(
+    model_path: str, providers=None, session_config: SessionConfig | None = None
+) -> onnxruntime.InferenceSession:
+    """Load (or return cached) segmentation session. ``session_config`` beats ``providers``."""
+    return get_session(model_path, session_config or _config_from_providers(providers))
+
+
+def load_embedding_session(
+    model_path: str, providers=None, session_config: SessionConfig | None = None
+) -> onnxruntime.InferenceSession:
+    """Load (or return cached) embedding session. ``session_config`` beats ``providers``."""
+    return get_session(model_path, session_config or _config_from_providers(providers))
+
+
+def _leak_reference(obj) -> None:
+    ctypes.pythonapi.Py_IncRef(ctypes.py_object(obj))
+
+
+def _after_fork_in_child() -> None:
+    """Make inherited sessions harmless in a forked child.
+
+    An inherited session's thread pool does not exist here, and destroying it
+    crashes or hangs the child, even at normal interpreter exit. Keep those
+    sessions alive forever and let the child build its own on demand.
+    """
+    global _session_lock
+    _session_lock = threading.Lock()
+    for session in _session_cache.values():
+        _leak_reference(session)
+    _session_cache.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
 def iter_windows(

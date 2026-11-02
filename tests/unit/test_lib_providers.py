@@ -8,8 +8,7 @@ def test_load_session_threads_providers(monkeypatch):
             captured["providers"] = providers
 
     monkeypatch.setattr(lib.onnxruntime, "InferenceSession", _FakeSession)
-    lib._seg_cache.clear()
-    lib._emb_cache.clear()
+    lib.clear_session_cache()
     want = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     lib.load_segmentation_session("/tmp/fake_seg.onnx", providers=want)
     assert captured["providers"] == want
@@ -27,6 +26,6 @@ def test_load_session_defaults_to_cpu(monkeypatch):
             captured["providers"] = providers
 
     monkeypatch.setattr(lib.onnxruntime, "InferenceSession", _FakeSession)
-    lib._seg_cache.clear()
+    lib.clear_session_cache()
     lib.load_segmentation_session("/tmp/fake_seg2.onnx")
     assert captured["providers"] == ["CPUExecutionProvider"]
