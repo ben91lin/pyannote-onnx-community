@@ -1,5 +1,7 @@
 """pyannote-onnx-community: torch-free ONNX pyannote community-1 diarization."""
 
+from pyannote_onnx_community._lib import clear_session_cache
+from pyannote_onnx_community.config import SessionConfig
 from pyannote_onnx_community.diarization import ONNXSpeakerDiarization
 from pyannote_onnx_community.embedding import ONNXSpeakerEmbedding
 from pyannote_onnx_community.output import DiarizeOutput
@@ -12,4 +14,6 @@ __all__ = [
     "ONNXSpeakerDiarization",
     "ONNXSpeakerEmbedding",
     "ONNXVoiceActivityDetection",
+    "SessionConfig",
+    "clear_session_cache",
 ]

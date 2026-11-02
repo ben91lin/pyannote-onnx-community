@@ -14,14 +14,10 @@ from collections.abc import Callable
 
 from pyannote.core import Annotation, Segment
 
-from pyannote_onnx_community._lib import (
-    load_embedding_session,
-    load_segmentation_session,
-    resolve_onnx_path,
-)
+from pyannote_onnx_community._lib import make_session_handle
 from pyannote_onnx_community._pipeline import PyannoteOnnxClient, SDResult
 from pyannote_onnx_community.audio import load_audio
-from pyannote_onnx_community.config import SDConfig
+from pyannote_onnx_community.config import SDConfig, SessionConfig
 from pyannote_onnx_community.output import DiarizeOutput
 
 SEGMENTATION_REPO = "onnx-community/pyannote-segmentation-3.0"
@@ -29,7 +25,12 @@ EMBEDDING_REPO = "onnx-community/wespeaker-voxceleb-resnet34-LM"
 
 
 class ONNXSpeakerDiarization:
-    """Torch-free community-1 (VBx + PLDA) diarization over ONNX Runtime."""
+    """Torch-free community-1 (VBx + PLDA) diarization over ONNX Runtime.
+
+    The constructor resolves (and if needed downloads) the model files, but
+    ONNX Runtime sessions are built on first call or on :meth:`preload`, so an
+    instance created before ``fork`` carries no session into the child.
+    """
 
     def __init__(
         self,
@@ -38,17 +39,31 @@ class ONNXSpeakerDiarization:
         config: SDConfig | None = None,
         seg_session=None,
         emb_session=None,
-        providers: list[str] | None = None,
+        providers: list | None = None,
+        seg_session_config: SessionConfig | None = None,
+        emb_session_config: SessionConfig | None = None,
     ):
         self.config = config or SDConfig()
-        self._providers = providers or ["CPUExecutionProvider"]
-        self._seg = seg_session or load_segmentation_session(
-            resolve_onnx_path(segmentation_repo, "onnx/model.onnx"), providers=self._providers
+        self._seg_handle = make_session_handle(
+            segmentation_repo, session=seg_session, session_config=seg_session_config, providers=providers
         )
-        self._emb = emb_session or load_embedding_session(
-            resolve_onnx_path(embedding_repo, "onnx/model.onnx"), providers=self._providers
+        self._emb_handle = make_session_handle(
+            embedding_repo, session=emb_session, session_config=emb_session_config, providers=providers
         )
-        self._client = PyannoteOnnxClient(seg_session=self._seg, emb_session=self._emb, config=self.config)
+
+    @property
+    def _seg(self):
+        return self._seg_handle.get()
+
+    @property
+    def _emb(self):
+        return self._emb_handle.get()
+
+    def preload(self) -> None:
+        """Build sessions and load PLDA now. Call after fork, in the process that infers."""
+        self._seg_handle.get()
+        self._emb_handle.get()
+        PyannoteOnnxClient(seg_session=None, emb_session=None, config=self.config)._load_plda()
 
     def __call__(
         self,
@@ -70,7 +85,8 @@ class ONNXSpeakerDiarization:
                 / ``diarization`` stage boundaries.
         """
         wav = load_audio(audio, sample_rate=self.config.sample_rate)
-        result = self._client(
+        client = PyannoteOnnxClient(seg_session=self._seg, emb_session=self._emb, config=self.config)
+        result = client(
             audio_input=wav,
             sample_rate=self.config.sample_rate,
             num_speakers=num_speakers,

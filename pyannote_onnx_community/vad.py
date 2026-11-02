@@ -14,11 +14,10 @@ from pyannote.core import Annotation, Segment
 from pyannote_onnx_community._lib import (
     hysteresis_binarize as _hysteresis_binarize,
     iter_windows,
-    load_segmentation_session,
-    resolve_onnx_path,
+    make_session_handle,
 )
 from pyannote_onnx_community.audio import load_audio
-from pyannote_onnx_community.config import VADConfig
+from pyannote_onnx_community.config import SessionConfig, VADConfig
 
 SEGMENTATION_REPO = "onnx-community/pyannote-segmentation-3.0"
 
@@ -201,13 +200,21 @@ class ONNXVoiceActivityDetection:
         segmentation_repo: str = SEGMENTATION_REPO,
         config: VADConfig | None = None,
         seg_session=None,
-        providers: list[str] | None = None,
+        providers: list | None = None,
+        seg_session_config: SessionConfig | None = None,
     ):
         self.config = config or VADConfig()
-        self._providers = providers or ["CPUExecutionProvider"]
-        self._seg = seg_session or load_segmentation_session(
-            resolve_onnx_path(segmentation_repo, "onnx/model.onnx"), providers=self._providers
+        self._seg_handle = make_session_handle(
+            segmentation_repo, session=seg_session, session_config=seg_session_config, providers=providers
         )
+
+    @property
+    def _seg(self):
+        return self._seg_handle.get()
+
+    def preload(self) -> None:
+        """Build the session now. Call after fork, in the process that infers."""
+        self._seg_handle.get()
 
     def __call__(self, audio) -> Annotation:
         wav = load_audio(audio, sample_rate=self.config.sample_rate)

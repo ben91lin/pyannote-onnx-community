@@ -9,28 +9,40 @@ from __future__ import annotations
 
 import numpy as np
 
-from pyannote_onnx_community._lib import load_embedding_session, resolve_onnx_path
+from pyannote_onnx_community._lib import make_session_handle
 from pyannote_onnx_community._pipeline import _WESPEAKER_MIN_FBANK_FRAMES, _compute_fbank
 from pyannote_onnx_community.audio import load_audio
+from pyannote_onnx_community.config import SessionConfig
 
 EMBEDDING_REPO = "onnx-community/wespeaker-voxceleb-resnet34-LM"
 
 
 class ONNXSpeakerEmbedding:
-    """Extract one L2-normalised 256-d embedding from a waveform/path."""
+    """Extract one L2-normalised 256-d embedding from a waveform/path.
+
+    The session is built on first call or on :meth:`preload`.
+    """
 
     def __init__(
         self,
         embedding_repo: str = EMBEDDING_REPO,
         emb_session=None,
-        providers: list[str] | None = None,
+        providers: list | None = None,
         sample_rate: int = 16000,
+        emb_session_config: SessionConfig | None = None,
     ):
-        self._providers = providers or ["CPUExecutionProvider"]
         self.sample_rate = sample_rate
-        self._emb = emb_session or load_embedding_session(
-            resolve_onnx_path(embedding_repo, "onnx/model.onnx"), providers=self._providers
+        self._emb_handle = make_session_handle(
+            embedding_repo, session=emb_session, session_config=emb_session_config, providers=providers
         )
+
+    @property
+    def _emb(self):
+        return self._emb_handle.get()
+
+    def preload(self) -> None:
+        """Build the session now. Call after fork, in the process that infers."""
+        self._emb_handle.get()
 
     def __call__(self, audio) -> np.ndarray:
         """Return a 256-d L2-normalised embedding.
