@@ -9,7 +9,61 @@ baseline).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+
+
+def _freeze_provider(provider):
+    if isinstance(provider, str):
+        return provider
+    name, options = provider
+    return (name, tuple(sorted(dict(options).items())))
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """ONNX Runtime session settings. Hashable, so it can key the session cache.
+
+    ``providers`` accepts provider names and ``(name, options)`` pairs, the same
+    forms ``onnxruntime.InferenceSession`` accepts. ``intra_op_threads=0`` keeps
+    the ONNX Runtime default, which sizes the pool from the host.
+    """
+
+    providers: tuple = ("CPUExecutionProvider",)
+    intra_op_threads: int = 0  # 0 = ONNX Runtime default
+
+    def __post_init__(self):
+        if isinstance(self.providers, str):
+            raise ValueError("providers must be a sequence, not a single string.")
+        frozen = tuple(_freeze_provider(p) for p in self.providers)
+        if not frozen:
+            raise ValueError("providers must not be empty.")
+        object.__setattr__(self, "providers", frozen)
+        threads = self.intra_op_threads
+        if isinstance(threads, bool) or not isinstance(threads, int) or threads < 0:
+            raise ValueError(f"intra_op_threads must be an integer >= 0, got {threads!r}.")
+
+    def ort_providers(self) -> list:
+        """Providers in the form ``onnxruntime.InferenceSession`` expects."""
+        return [p if isinstance(p, str) else (p[0], dict(p[1])) for p in self.providers]
+
+    @classmethod
+    def from_env(cls, prefix: str, *, providers=None) -> SessionConfig:
+        """Build a config from ``{prefix}_INTRA_OP_THREADS``.
+
+        Unset or blank means ``0``. An invalid value raises ``ValueError`` so a
+        bad deployment fails at startup.
+        """
+        name = f"{prefix}_INTRA_OP_THREADS"
+        raw = os.environ.get(name, "").strip()
+        try:
+            threads = int(raw) if raw else 0
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an integer, got {raw!r}.") from exc
+        kwargs = {"intra_op_threads": threads}
+        if providers:
+            kwargs["providers"] = tuple(providers)
+        return cls(**kwargs)
 
 
 @dataclass
