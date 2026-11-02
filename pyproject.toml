@@ -31,6 +31,11 @@ dev = [
     "pyannote.metrics>=3.2",
     "pytest>=7",
 ]
+# Torch-free test dependencies: unit, parity-skip and integration tests.
+test = [
+    "pytest>=7",
+    "onnx>=1.16",
+]
 
 [tool.setuptools]
 packages = ["pyannote_onnx_community"]

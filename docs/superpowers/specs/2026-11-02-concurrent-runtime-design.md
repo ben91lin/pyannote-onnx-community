@@ -29,7 +29,7 @@ Probed with a small MatMul model on onnxruntime 1.31.1, Python 3.13, Linux, CPU 
 | Inherited session, child deletes it | `SIGSEGV` |
 | Inherited session, kept in a Python list, child exits normally | Hang until the watchdog alarm fired |
 | Inherited session, leaked with `Py_IncRef`, child builds a new session | Exit 0, correct output, new pool has its threads |
-| No session in parent, child builds, runs, deletes, exits | Exit 0 |
+| No session in parent, child builds, runs, deletes, exits | Exit 0 on the original probe host; see the re-check below |
 | 8 threads sharing one session | Correct output, no extra pool threads |
 | 16 threads through the prototype cache | Correct output, no duplicate session |
 | Prototype of this design, parent preloaded or lock held at fork | Exit 0 across 3 repeated runs, child rebuilt with 4 threads |
@@ -39,6 +39,20 @@ Conclusions:
 - Creating sessions before fork is the failure to design out. The danger is mainly at teardown, not during `run()`, so it can look healthy until a worker exits.
 - Clearing the cache in the child is not enough, because dropping the last reference runs the destructor and crashes. Inherited sessions must be leaked on purpose.
 - Python 3.12+ also emits a `DeprecationWarning` when a process with live pool threads forks.
+
+Re-check during implementation (2026-11-02, Linux container, 4 vCPU, Python 3.13, onnxruntime 1.29.0 and 1.31.1):
+
+| Scenario | Result |
+| --- | --- |
+| Parent only imported onnxruntime, child exits via `exit()` / `sys.exit()` | Hang. gdb: `__run_exit_handlers` → ORT static destructor → `pthread_cond_destroy`, waiting on a condition variable used by a thread ORT starts at import. Same with `disable_telemetry_events()` and with `OMP_NUM_THREADS=1` |
+| Same, child exits via `os._exit()` | Exit 0 |
+| Parent built a session, child drops it (`del` + `gc.collect()`), `os._exit()` | `SIGSEGV` |
+| Parent built a session, child keeps it, builds its own, `os._exit()` | Exit 0 |
+
+- The `exit()` hang happens with or without sessions, so it is outside the library's reach. The library must not try to work around it.
+- billiard and `multiprocessing` end forked children with `os._exit`, so Celery prefork is not affected. Code that calls `os.fork()` by hand must end the child with `os._exit`.
+- The inherited-session destructor crash is confirmed, so the fork handler is still needed. The integration tests exercise it by dropping the cache in the child before `os._exit`.
+- `tests/integration` passes on onnxruntime 1.20.1, 1.29.0 and 1.31.1. Python 3.13 has no 1.16 wheel, so the floor itself was not tested.
 
 Not covered: CUDA, CoreML, billiard's child exit path, and machines with many cores. The acceptance plan below covers these on real hosts.
 
