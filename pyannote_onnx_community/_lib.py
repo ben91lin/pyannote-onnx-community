@@ -16,6 +16,7 @@ import ctypes
 import os
 import threading
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +31,7 @@ except ImportError:  # pragma: no cover — gated by extras at install time
 
 
 __all__ = [
+    "SessionHandle",
     "clear_session_cache",
     "get_session",
     "hysteresis_binarize",
@@ -37,6 +39,7 @@ __all__ = [
     "iter_windows",
     "load_embedding_session",
     "load_segmentation_session",
+    "make_session_handle",
     "resolve_onnx_path",
 ]
 
@@ -142,6 +145,32 @@ def _after_fork_in_child() -> None:
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionHandle:
+    """Where to get a session. Holds no library-created session, so it survives fork."""
+
+    path: str | None = None
+    config: SessionConfig | None = None
+    session: object | None = None
+
+    def get(self):
+        return self.session if self.session is not None else get_session(self.path, self.config)
+
+
+def make_session_handle(repo_or_path: str, *, session, session_config, providers) -> SessionHandle:
+    """Resolve the model file now; build the session later through the cache.
+
+    Priority: injected ``session`` > ``session_config`` > ``providers`` > CPU.
+    An injected session together with a config raises, since one would be ignored.
+    """
+    if session is not None:
+        if session_config is not None:
+            raise ValueError("Pass either an injected session or a session config, not both.")
+        return SessionHandle(session=session)
+    config = session_config or _config_from_providers(providers)
+    return SessionHandle(path=resolve_onnx_path(repo_or_path, "onnx/model.onnx"), config=config)
 
 
 def iter_windows(

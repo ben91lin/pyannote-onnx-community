@@ -62,6 +62,34 @@ def test_clear_session_cache():
     assert lib.get_session("m") is not a
 
 
+def test_handle_with_injected_session_never_resolves(monkeypatch):
+    monkeypatch.setattr(lib, "resolve_onnx_path", lambda *a: pytest.fail("resolved"))
+    injected = object()
+    handle = lib.make_session_handle("repo", session=injected, session_config=None, providers=None)
+    assert handle.get() is injected
+
+
+def test_handle_rejects_session_and_config():
+    with pytest.raises(ValueError):
+        lib.make_session_handle("repo", session=object(), session_config=SessionConfig(), providers=None)
+
+
+def test_handle_resolves_now_but_builds_later(monkeypatch):
+    resolved = []
+    monkeypatch.setattr(lib, "resolve_onnx_path", lambda *a: resolved.append(a) or "m")
+    handle = lib.make_session_handle("repo", session=None, session_config=None, providers=["P"])
+    assert resolved and _FakeSession.created == []
+    assert handle.get().providers == ["P"]
+
+
+def test_handle_config_beats_providers(monkeypatch):
+    monkeypatch.setattr(lib, "resolve_onnx_path", lambda *a: "m")
+    handle = lib.make_session_handle(
+        "repo", session=None, session_config=SessionConfig(providers=["C"]), providers=["P"]
+    )
+    assert handle.get().providers == ["C"]
+
+
 def test_after_fork_hook_leaks_and_clears(monkeypatch):
     incref = []
     monkeypatch.setattr(lib, "_leak_reference", incref.append)
