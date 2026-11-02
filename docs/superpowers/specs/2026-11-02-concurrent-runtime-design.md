@@ -1,6 +1,6 @@
 # Concurrent Runtime Design
 
-Status: proposed, not implemented.
+Status: implemented (plan Tasks 1–7). Maintainer validation on real hosts (Task 8) is pending.
 
 ## Goal
 
