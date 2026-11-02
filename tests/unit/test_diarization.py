@@ -47,6 +47,8 @@ def _make_dia(monkeypatch):
     import pyannote_onnx_community._pipeline as pipe
 
     monkeypatch.setattr(pipe, "cluster_embeddings_vbx", _fake_cluster)
+    # The clustering stub ignores PLDA; stub the load so no network is needed.
+    monkeypatch.setattr("pyannote_onnx_community._plda.load_plda", lambda repo_id: object())
     return dia
 
 

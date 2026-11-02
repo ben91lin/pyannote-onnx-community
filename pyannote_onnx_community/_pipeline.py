@@ -733,11 +733,11 @@ class PyannoteOnnxClient:
     plda: object | None = None  # lazily loaded on first cluster call
 
     def _load_plda(self):
-        """Lazily resolve the community-1 PLDA artifacts via HF cache."""
+        """Lazily resolve the community-1 PLDA artifacts via the per-process cache."""
         if self.plda is None:
-            from pyannote_onnx_community._plda import PLDA
+            from pyannote_onnx_community import _plda
 
-            self.plda = PLDA.from_pretrained(self.config.plda_repo_id, subfolder="plda")
+            self.plda = _plda.load_plda(self.config.plda_repo_id)
             if self.plda is None:
                 raise RuntimeError(
                     f"Failed to resolve PLDA artifacts from {self.config.plda_repo_id!r}. "

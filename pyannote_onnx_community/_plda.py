@@ -8,6 +8,7 @@ Modifications:
     ``huggingface_hub.snapshot_download`` (offline-friendly snapshot resolve
     for ONNX repos)
   - import ``vbx_setup`` from the sibling ``_vbx`` module
+  - add ``load_plda``, a locked per-process cache
 """
 
 # MIT License
@@ -26,6 +27,7 @@ Modifications:
 # copies or substantial portions of the Software.
 
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -112,3 +114,30 @@ class PLDA:
             return None
 
         return cls(path_to_transform, path_to_plda)
+
+
+_plda_cache: dict[str, PLDA] = {}
+_plda_lock = threading.Lock()
+
+
+def load_plda(repo_id: str) -> Optional[PLDA]:
+    """Load PLDA once per process. Read-only, so threads and forks may share it.
+
+    A failed load (``None``) is not cached, so a later call can retry.
+    """
+    with _plda_lock:
+        plda = _plda_cache.get(repo_id)
+        if plda is None:
+            plda = PLDA.from_pretrained(repo_id, subfolder="plda")
+            if plda is not None:
+                _plda_cache[repo_id] = plda
+        return plda
+
+
+def _reset_lock_after_fork() -> None:
+    global _plda_lock
+    _plda_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_lock_after_fork)
