@@ -65,7 +65,11 @@ vec = emb("audio.wav")                         # -> (256,) L2-normalised np.floa
 
 - `providers` (all three classes) selects the ONNX Runtime execution provider —
   `["CPUExecutionProvider"]` (default), `["CUDAExecutionProvider"]`,
-  `["CoreMLExecutionProvider"]`, etc.
+  `["CoreMLExecutionProvider"]`, etc. Provider options work too:
+  `[("CUDAExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"]`.
+- `seg_session_config` / `emb_session_config` take a `SessionConfig` with
+  `providers` and an `intra_op_threads` limit per model. See
+  [Concurrency and deployment](#concurrency-and-deployment).
 - `ONNXSpeakerDiarization.__call__` returns a `DiarizeOutput` (overlap-aware
   `speaker_diarization`, non-overlapping `exclusive_speaker_diarization`,
   per-speaker `speaker_embeddings`, and `serialize()`) — mirroring upstream
@@ -75,6 +79,60 @@ vec = emb("audio.wav")                         # -> (256,) L2-normalised np.floa
   speaker count is forced via a KMeans re-cluster. `min`/`max` are ignored when
   `num_speakers` is given. Invalid values (`<= 0`, or `min_speakers >
   max_speakers`) raise `ValueError` rather than being silently clamped.
+
+## Concurrency and deployment
+
+Constructors resolve and download model files, so a missing model or a gated
+repo still fails at construction. ONNX Runtime sessions are built later, on the
+first call or on `preload()`, and are shared per process through one locked
+cache keyed by model file and `SessionConfig`. VAD and diarization share a
+segmentation session when their configs are equal. `clear_session_cache()`
+drops the cache's references; call it only when no inference is running.
+
+```python
+from celery.signals import worker_process_init  # threads pool: worker_init
+
+from pyannote_onnx_community import ONNXSpeakerDiarization, SessionConfig
+
+dia = ONNXSpeakerDiarization(
+    seg_session_config=SessionConfig.from_env("PYANNOTE_ONNX_SEGMENTATION"),
+    emb_session_config=SessionConfig.from_env("PYANNOTE_ONNX_EMBEDDING"),
+)
+
+
+@worker_process_init.connect
+def init_models(**_):
+    dia.preload()
+```
+
+`SessionConfig.from_env(prefix)` reads `{prefix}_INTRA_OP_THREADS`. Unset or
+blank means `0`, the ONNX Runtime default, which sizes the pool from the host.
+An invalid value raises `ValueError`, so a bad deployment fails at startup. The
+library never reads the environment unless you call `from_env`.
+
+| Mode | Sessions | Thread budget | Where to call `preload()` |
+| --- | --- | --- | --- |
+| Celery prefork | One set per child | `workers × intra ≈ allocated cores` | `worker_process_init` |
+| Celery threads | One set per worker | `intra` = cores for this worker | `worker_init` |
+| Multi-threaded service | One set per process | `intra` = cores for this process | Application startup |
+| gevent / eventlet | Not recommended | Inference blocks the event loop | Use a separate worker |
+
+- **Never build sessions before fork.** Call `preload()` in the process that
+  runs inference, not in the parent. If a session is built in the parent by
+  mistake, the child leaks it on purpose instead of destroying it, because
+  destroying an inherited session crashes the child.
+- **Injected sessions (`seg_session=` / `emb_session=`) belong to you.** The
+  library cannot protect them, so create them after fork.
+- **End hand-forked children with `os._exit`.** Once a process has imported
+  onnxruntime, a forked child that exits through `exit()` / `sys.exit()` can
+  hang in ONNX Runtime's own teardown, whether or not any session exists.
+  Celery prefork (billiard) and `multiprocessing` already use `os._exit`.
+- PLDA and VBx run through NumPy and SciPy, so also set `OPENBLAS_NUM_THREADS`
+  and `OMP_NUM_THREADS` to fit the same budget.
+- ONNX Runtime sizes its default pool from the host, not necessarily from a
+  container CPU limit. Set `intra_op_threads` explicitly in containers.
+- Pin GPUs with provider options (`{"device_id": n}`) or `CUDA_VISIBLE_DEVICES`.
+- Inference has no side effects, so requeueing a task is safe at this layer.
 
 ## Validation — per-stage array parity vs official pyannote.audio PyTorch
 
@@ -157,8 +215,10 @@ Install the dev extras in a **separate venv** — they pull
 and benchmarking, never at runtime:
 
 ```bash
-pip install -e '.[dev]'                # SEPARATE venv (pyannote.audio==4.0.4 + torch)
+pip install -e '.[test]'               # torch-free: pytest + onnx
 pytest tests/unit tests/parity         # torch-free
+pytest tests/integration               # torch-free: fork/thread tests on a tiny real ONNX model
+pip install -e '.[dev]'                # SEPARATE venv (pyannote.audio==4.0.4 + torch)
 python scripts/make_goldens.py         # regenerate per-stage goldens (dev venv)
 pytest tests/e2e                       # DER parity (dev venv, needs HF token for gated community-1)
 python scripts/benchmark.py <audio>    # speed table (dev venv)
