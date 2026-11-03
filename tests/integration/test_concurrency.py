@@ -195,6 +195,10 @@ def test_threads_share_one_session(model):
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="counts /proc/self/task")
 def test_intra_op_thread_count(model):
+    # "+3 for intra_op_threads=4" is a property of the ONNX Runtime build, not of
+    # this library; it held on the 1.20.1, 1.29.0 and 1.31.1 pip wheels. If a
+    # build ever differs, loosen this to ">= 1 and <= 3" instead of skipping it:
+    # the point is that the setting reaches the session and caps the pool.
     proc = _run(
         """
         before = len(os.listdir("/proc/self/task"))

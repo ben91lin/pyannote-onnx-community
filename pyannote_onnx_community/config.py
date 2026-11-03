@@ -13,11 +13,22 @@ import os
 from dataclasses import dataclass
 
 
+def _freeze_option_value(value):
+    # ONNX Runtime's Python binding passes every option value through str(), so
+    # an unhashable value (list, dict) is frozen to that same string. Hashable
+    # values are kept as-is so ort_providers() round-trips them unchanged.
+    try:
+        hash(value)
+    except TypeError:
+        return str(value)
+    return value
+
+
 def _freeze_provider(provider):
     if isinstance(provider, str):
         return provider
     name, options = provider
-    return (name, tuple(sorted(dict(options).items())))
+    return (name, tuple(sorted((k, _freeze_option_value(v)) for k, v in dict(options).items())))
 
 
 @dataclass(frozen=True)

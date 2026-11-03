@@ -16,6 +16,12 @@ def test_provider_options_are_hashable_and_round_trip():
     assert c.ort_providers() == [("CUDAExecutionProvider", opts), "CPUExecutionProvider"]
 
 
+def test_unhashable_option_values_are_frozen_to_str():
+    c = SessionConfig(providers=[("P", {"profiles": [1, 2], "extra": {"a": 1}})])
+    hash(c)
+    assert c.ort_providers() == [("P", {"extra": "{'a': 1}", "profiles": "[1, 2]"})]
+
+
 def test_option_order_does_not_change_identity():
     a = SessionConfig(providers=[("P", {"a": 1, "b": 2})])
     b = SessionConfig(providers=[("P", {"b": 2, "a": 1})])

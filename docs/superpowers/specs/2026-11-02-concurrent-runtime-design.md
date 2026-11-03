@@ -187,7 +187,7 @@ Automated:
 2. Provider options no longer raise.
 3. Constructors create no session until first use or `preload()`.
 4. Sessions are shared for equal configs and separate for different ones.
-5. Against a real tiny ONNX model, in subprocesses with a timeout:
+5. Against a real tiny ONNX model, in subprocesses with a timeout. Forked children release the cache (`clear_session_cache()` + `gc.collect()`) and then end with `os._exit`, as billiard and `multiprocessing` do. Do not change them to `sys.exit`: that path hangs in ONNX Runtime's own teardown whether or not any session exists (see the re-check under Evidence).
    - Fork with a preloaded parent exits 0 and returns correct output.
    - An idle child of a preloaded parent exits 0.
    - Fork while the cache lock is held does not deadlock.
